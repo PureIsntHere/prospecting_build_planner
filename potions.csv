@@ -1,0 +1,7 @@
+name,luck,dig_str,capacity,dig_speed,shake_str,shake_speed,sell,size,modifier
+Basic Luck Potion,5,0,0,0,0,0,0,0,0
+Volcanic Luck Potion,20,0,0,0,0,0,0,0,0
+Basic Capacity Potion,0,0,25,0,0,0,0,0,0
+Greater Capacity Potion,0,0,50,0,0,0,0,0,0
+Greater Luck Potion,10,0,0,0,0,0,0,0,0
+Volcanic Strength Potion,0,5,0,0,0,0,0,0,0

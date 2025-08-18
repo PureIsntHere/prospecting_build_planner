@@ -1,0 +1,14 @@
+name,luck,capacity,shake_str,shake_speed_mult
+Rusty Pan,1.0,5,0.2,0.8
+Plastic Pan,1.5,10,0.4,0.8
+Metal Pan,2.0,20,0.5,0.8
+Silver Pan,4.0,30,0.8,0.9
+Golden Pan,10.0,35,1.0,0.8
+Magnetic Pan,15.0,50,1.0,0.75
+Meteoric Pan,22.0,70,2.0,1.0
+Diamond Pan,35.0,100,3.0,1.0
+Aurora Pan,50.0,130,3.0,1.25
+Worldshaker Pan,70.0,150,5.0,1.0
+Dragonflame Pan,150.0,180,10.0,1.1
+Fossilized Pan,200.0,225,8.0,1.0
+Frostbite Pan,300.0,250,15.0,0.8

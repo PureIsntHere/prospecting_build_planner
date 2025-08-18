@@ -1,0 +1,15 @@
+name,dig_str,dig_speed_mult,toughness
+Rusty Shovel,1.0,0.8,1
+Iron Shovel,2.0,0.8,1
+Steel Shovel,3.0,0.8,2
+Silver Shovel,4.0,1.1,2
+Reinforced Shovel,5.0,0.9,3
+The Excavator,7.0,0.7,3
+Golden Shovel,8.0,1.0,3
+Meteoric Shovel,7.0,1.5,4
+Diamond Shovel,12.0,1.0,4
+Divine Shovel,16.0,1.1,5
+Earthbreaker Shovel,25.0,1.0,5
+Dragonflame Shovel,50.0,0.6,5
+Fossilized Shovel,40.0,1.0,5
+Icebreaker,60.0,1.1,6

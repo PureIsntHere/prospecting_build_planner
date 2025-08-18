@@ -1,0 +1,1345 @@
+import math
+import json
+import numpy as np
+import pandas as pd
+import streamlit as st
+
+APP_TITLE = "Pures Optimizer"
+BASE_SHAKE_SECONDS = 0.25
+BASE_COLLECT_SECONDS = 2.0
+EFFICIENCY_DIVISOR = 0.65
+
+
+# Data loading
+@st.cache_data
+def load_csvs():
+    """Load all CSVs and build a 6★ override map (only fields that differ)."""
+    equip = pd.read_csv("equipment.csv")
+
+    # Optional overrides
+    equip6_full = None
+    for path in ("equipment_6_full.csv", "equipment_6.csv"):
+        try:
+            equip6_full = pd.read_csv(path)
+            break
+        except Exception:
+            equip6_full = None
+
+    equip6_map = {}
+    if equip6_full is not None:
+        equip6_full.columns = [c.strip() for c in equip6_full.columns]
+        equip.columns = [c.strip() for c in equip.columns]
+        numeric_cols = [
+            "luck",
+            "dig_str",
+            "capacity",
+            "dig_speed",
+            "shake_str",
+            "shake_speed",
+            "sell",
+            "size",
+            "modifier",
+        ]
+        base_by_name = equip.set_index("name")
+        for _, r in equip6_full.iterrows():
+            name = str(r["name"])
+            if name not in base_by_name.index:
+                continue
+            diffs = {}
+            b = base_by_name.loc[name]
+            for col in numeric_cols:
+                try:
+                    v6 = float(r[col])
+                    vb = float(b[col])
+                except Exception:
+                    continue
+                if pd.isna(v6) or pd.isna(vb):
+                    continue
+                if abs(v6 - vb) > 1e-9:
+                    diffs[col] = v6
+            if diffs:
+                equip6_map[name] = diffs
+
+    ench = pd.read_csv("enchants.csv")
+    pots = pd.read_csv("potions.csv")
+    buffs = pd.read_csv("buffs.csv")
+
+    pans = pd.read_csv("pans.csv")
+    shovels = pd.read_csv("shovels.csv")
+
+    # Normalize/cast types for pans & shovels
+    if "shake_speed_mult" not in pans.columns:
+        pans["shake_speed_mult"] = 1.0
+    pans["luck"] = pd.to_numeric(pans.get("luck", 0), errors="coerce").fillna(0.0)
+    pans["capacity"] = pd.to_numeric(pans.get("capacity", 0), errors="coerce").fillna(
+        0.0
+    )
+    pans["shake_str"] = pd.to_numeric(pans.get("shake_str", 0), errors="coerce").fillna(
+        0.0
+    )
+    pans["shake_speed_mult"] = pd.to_numeric(
+        pans.get("shake_speed_mult", 1.0), errors="coerce"
+    ).fillna(1.0)
+
+    if "toughness" not in shovels.columns:
+        shovels["toughness"] = 0
+    shovels["dig_str"] = pd.to_numeric(
+        shovels.get("dig_str", 0), errors="coerce"
+    ).fillna(0.0)
+    shovels["dig_speed_mult"] = pd.to_numeric(
+        shovels.get("dig_speed_mult", 1.0), errors="coerce"
+    ).fillna(1.0)
+    shovels["toughness"] = pd.to_numeric(
+        shovels.get("toughness", 0), errors="coerce"
+    ).fillna(0.0)
+
+    return equip, equip6_map, ench, pots, buffs, pans, shovels
+
+
+def row_to_item(row, star6, overrides=None):
+    """Convert an equipment DataFrame row to a dict used by compute_once()."""
+    return dict(
+        name=row["name"],
+        luck=float(row.get("luck", 0.0)),
+        dig_str=float(row.get("dig_str", 0.0)),
+        capacity=float(row.get("capacity", 0.0)),
+        dig_speed=float(row.get("dig_speed", 0.0)),
+        shake_str=float(row.get("shake_str", 0.0)),
+        shake_speed=float(row.get("shake_speed", 0.0)),
+        sell=float(row.get("sell", 0.0)),
+        size=float(row.get("size", 0.0)),
+        modifier=float(row.get("modifier", 0.0)),
+        star6=bool(star6),
+        overrides=(overrides or {}),
+    )
+
+
+# Computation
+def compute_once(
+    pan,
+    shovel,
+    items,
+    ench_row,
+    potion_rows,
+    buff_rows,
+    luck_mult,
+    str_mult,
+    overhead_s,
+    login_bonus_luck,
+):
+    """Compute totals and derived metrics for a single build."""
+    totals = dict(
+        luck=float(pan["luck"]),
+        capacity=float(pan["capacity"]),
+        shake_str=float(pan["shake_str"]),
+        dig_str=float(shovel["dig_str"]),
+        dig_speed=0.0,
+        shake_speed=0.0,
+        sell=0.0,
+        size=0.0,
+        modifier=0.0,
+    )
+
+    # Equipment - 6 star overrides if toggled on that item
+    for it in items:
+        use_over = (
+            bool(it.get("star6"))
+            and isinstance(it.get("overrides"), dict)
+            and len(it["overrides"]) > 0
+        )
+
+        def v(key):
+            if use_over and key in it["overrides"]:
+                return float(it["overrides"][key])
+            return float(it.get(key, 0.0))
+
+        totals["luck"] += v("luck")
+        totals["dig_str"] += v("dig_str")
+        totals["capacity"] += v("capacity")
+        totals["dig_speed"] += v("dig_speed")
+        totals["shake_str"] += v("shake_str")
+        totals["shake_speed"] += v("shake_speed")
+        totals["sell"] += v("sell")
+        totals["size"] += v("size")
+        totals["modifier"] += v("modifier")
+
+    # Enchant
+    if ench_row is not None and len(ench_row):
+        if isinstance(ench_row, pd.Series):
+            ench_row = ench_row.to_dict()
+        totals["luck"] += float(ench_row.get("luck", 0.0))
+        totals["capacity"] += float(ench_row.get("capacity", 0.0))
+        totals["shake_str"] += float(ench_row.get("shake_str", 0.0))
+        totals["shake_speed"] += float(ench_row.get("shake_speed", 0.0))
+        totals["sell"] += float(ench_row.get("sell", 0.0))
+        totals["size"] += float(ench_row.get("size", 0.0))
+        totals["modifier"] += float(ench_row.get("modifier", 0.0))
+
+    # Potions
+    for pr in potion_rows:
+        if isinstance(pr, pd.Series):
+            pr = pr.to_dict()
+        totals["luck"] += float(pr.get("luck", 0.0))
+        totals["dig_str"] += float(pr.get("dig_str", 0.0))
+        totals["capacity"] += float(pr.get("capacity", 0.0))
+        totals["dig_speed"] += float(pr.get("dig_speed", 0.0))
+        totals["shake_str"] += float(pr.get("shake_str", 0.0))
+        totals["shake_speed"] += float(pr.get("shake_speed", 0.0))
+        totals["sell"] += float(pr.get("sell", 0.0))
+        totals["size"] += float(pr.get("size", 0.0))
+        totals["modifier"] += float(pr.get("modifier", 0.0))
+
+    # Buffs
+    for br in buff_rows:
+        if isinstance(br, pd.Series):
+            br = br.to_dict()
+        totals["luck"] += float(br.get("luck", 0.0))
+        totals["dig_str"] += float(br.get("dig_str", 0.0))
+        totals["capacity"] += float(br.get("capacity", 0.0))
+        totals["dig_speed"] += float(br.get("dig_speed", 0.0))
+        totals["shake_str"] += float(br.get("shake_str", 0.0))
+        totals["shake_speed"] += float(br.get("shake_speed", 0.0))
+        totals["sell"] += float(br.get("sell", 0.0))
+        totals["size"] += float(br.get("size", 0.0))
+        totals["modifier"] += float(br.get("modifier", 0.0))
+
+    # Login bonus
+    totals["luck"] += float(login_bonus_luck)
+
+    # Effective multipliers
+    eff_luck = totals["luck"] * float(luck_mult)
+    eff_shake_str = totals["shake_str"] * float(str_mult)
+
+    # Speed & time
+    dig_factor = (1.0 + totals["dig_speed"] / 100.0) * float(shovel["dig_speed_mult"])
+    shake_factor = 1.0 + totals["shake_speed"] / 100.0
+    per_shake_seconds = BASE_SHAKE_SECONDS * float(pan["shake_speed_mult"])
+
+    shakes = int(np.ceil(max(1e-6, totals["capacity"]) / max(1e-6, eff_shake_str)))
+    shake_time = (shakes * per_shake_seconds) / max(1e-6, shake_factor)
+    collect_time = BASE_COLLECT_SECONDS / max(1e-6, dig_factor)
+    total_time = float(overhead_s) + shake_time + collect_time
+
+    # Metrics
+    efficiency = (eff_luck * math.sqrt(max(0.0, totals["capacity"]))) / (
+        max(1e-6, total_time) * EFFICIENCY_DIVISOR
+    )
+    profit_rate = efficiency * (1.0 + totals["sell"] / 100.0)
+
+    return totals, dict(
+        eff_luck=eff_luck,
+        eff_shake_str=eff_shake_str,
+        shakes=shakes,
+        time_per_pan_s=total_time,
+        efficiency=efficiency,
+        profit_rate=profit_rate,
+    )
+
+
+def mc_overhead_sim(
+    pan,
+    shovel,
+    items,
+    ench_row,
+    potion_rows,
+    buff_rows,
+    luck_mult,
+    str_mult,
+    overhead_mu,
+    overhead_sigma,
+    overhead_min,
+    overhead_max,
+    login_bonus_luck,
+    runs=400,
+    seed=42,
+):
+    """Monte Carlo over overhead to estimate mean/std of time/efficiency/profit."""
+    base_totals, base_res = compute_once(
+        pan,
+        shovel,
+        items,
+        ench_row,
+        potion_rows,
+        buff_rows,
+        luck_mult,
+        str_mult,
+        overhead_mu,
+        login_bonus_luck,
+    )
+    per_shake_seconds = BASE_SHAKE_SECONDS * float(pan["shake_speed_mult"])
+    dig_factor = (1.0 + base_totals["dig_speed"] / 100.0) * float(
+        shovel["dig_speed_mult"]
+    )
+    shake_factor = 1.0 + base_totals["shake_speed"] / 100.0
+
+    eff_luck = base_res["eff_luck"]
+    cap = base_totals["capacity"]
+    sell = base_totals["sell"]
+    shakes = base_res["shakes"]
+
+    rng = np.random.default_rng(seed)
+    eff_vals, prof_vals, time_vals = [], [], []
+
+    for _ in range(int(runs)):
+        overhead = np.clip(
+            rng.normal(overhead_mu, overhead_sigma), overhead_min, overhead_max
+        )
+        shake_time = (shakes * per_shake_seconds) / max(1e-6, shake_factor)
+        collect_time = BASE_COLLECT_SECONDS / max(1e-6, dig_factor)
+        total_time = overhead + shake_time + collect_time
+        eff = (eff_luck * math.sqrt(max(0.0, cap))) / (
+            max(1e-6, total_time) * EFFICIENCY_DIVISOR
+        )
+        prof = eff * (1.0 + sell / 100.0)
+        eff_vals.append(eff)
+        prof_vals.append(prof)
+        time_vals.append(total_time)
+
+    return dict(
+        time_mean=float(np.mean(time_vals)),
+        time_std=float(np.std(time_vals, ddof=1)),
+        eff_mean=float(np.mean(eff_vals)),
+        eff_std=float(np.std(eff_vals, ddof=1)),
+        prof_mean=float(np.mean(prof_vals)),
+        prof_std=float(np.std(prof_vals, ddof=1)),
+    )
+
+
+def empty_item(slot_name="(Empty)"):
+    return dict(
+        name=slot_name,
+        luck=0.0,
+        dig_str=0.0,
+        capacity=0.0,
+        dig_speed=0.0,
+        shake_str=0.0,
+        shake_speed=0.0,
+        sell=0.0,
+        size=0.0,
+        modifier=0.0,
+        star6=False,
+        overrides={},
+    )
+
+
+def score_from_res(res, objective):
+    """Pick objective score from result dict."""
+    return res["efficiency"] if objective.startswith("Mythic") else res["profit_rate"]
+
+
+# UI
+st.set_page_config(page_title=APP_TITLE, layout="wide")
+st.title(APP_TITLE)
+st.caption("Build Planner and Build Generator")
+
+equip, equip6_map, enchants, potions, buffs, pans, shovels = load_csvs()
+
+# Information Tab
+tab_info, tab_build, tab_opt = st.tabs(
+    ["Information", "Build Planner", "Optimizer (BETA)"]
+)
+
+# Info
+with tab_info:
+    st.markdown("## What the stats mean")
+    st.markdown(
+        """
+- **Luck** — Base chance driver for rare finds; scaled by Meteor/Luck Totem if toggled.
+- **Dig Strength** — Affects how quickly you collect the pan (pairs with **Dig Speed**).
+- **Capacity** — Total dirt per pan. More capacity increases yield but may increase time via more **Shakes**.
+- **Dig Speed %** — Percentage speed bonus applied to shovel's base speed multiplier.
+- **Shake Strength** — Dirt processed per shake (multiplied by Strength Totem).
+- **Shake Speed %** — Percentage speed bonus for shaking.
+- **Sell Boost** — Multiplier applied to value; used in **Profit rate** only.
+- **Size Boost** — Extra block size; included for completeness (does not affect efficiency formula).
+- **Modifier** — Generic extra multiplier slot if your data uses it.
+    """
+    )
+
+    st.markdown(
+        """
+**Overhead** is the per-pan constant (picking up, moving, etc.).  
+**Monte Carlo**: we sample Overhead from a normal distribution with clamp bounds to get mean ± std for Time/Efficiency/Profit.
+    """
+    )
+
+# Build Planner
+with tab_build:
+
+    def has6(name: str) -> bool:
+        return bool(name and name != "(Empty)" and name in equip6_map)
+
+    # Sidebar - Pan & Shovel
+    with st.sidebar:
+        st.header("Pan & Shovel")
+        pan_name = st.selectbox("Pan", pans["name"].tolist(), key="pan_select")
+        shv_name = st.selectbox("Shovel", shovels["name"].tolist(), key="shovel_select")
+
+        prow = pans[pans["name"] == pan_name].iloc[0]
+        srow = shovels[shovels["name"] == shv_name].iloc[0]
+        pan = dict(
+            name=prow["name"],
+            luck=float(prow["luck"]),
+            capacity=float(prow["capacity"]),
+            shake_str=float(prow["shake_str"]),
+            shake_speed_mult=float(prow["shake_speed_mult"]),
+        )
+        shovel = dict(
+            name=srow["name"],
+            dig_str=float(srow["dig_str"]),
+            dig_speed_mult=float(srow["dig_speed_mult"]),
+            toughness=float(srow.get("toughness", 0)),
+        )
+
+        st.caption(
+            f"**Pan**: {pan['name']} — Luck {int(pan['luck'])}, Cap {int(pan['capacity'])}, Shake STR {pan['shake_str']:.1f}, Time ×{pan['shake_speed_mult']:.2f}"
+        )
+        st.caption(
+            f"**Shovel**: {shovel['name']} — Dig STR {shovel['dig_str']:.1f}, Speed ×{shovel['dig_speed_mult']:.2f} (Tough {int(shovel.get('toughness',0))})"
+        )
+
+    # Equipment selection
+    left, right = st.columns([1, 2])
+
+    with left:
+        st.subheader("Neck")
+        neck_df = equip[
+            equip["slot"].astype(str).str.strip().str.lower() == "necklace"
+        ].copy()
+        neck_opts = ["(Empty)"] + neck_df["name"].tolist()
+        neck_name = st.selectbox("Neck", neck_opts, key="neck_select", index=0)
+        neck_star6 = (
+            False
+            if neck_name == "(Empty)"
+            else st.checkbox(
+                "Neck 6★",
+                key="neck_star6_cb",
+                value=False,
+                disabled=not has6(neck_name),
+            )
+        )
+
+        st.subheader("Charm")
+        charm_df = equip[
+            equip["slot"].astype(str).str.strip().str.lower() == "charm"
+        ].copy()
+        charm_opts = ["(Empty)"] + charm_df["name"].tolist()
+        charm_name = st.selectbox("Charm", charm_opts, key="charm_select", index=0)
+        charm_star6 = (
+            False
+            if charm_name == "(Empty)"
+            else st.checkbox(
+                "Charm 6★",
+                key="charm_star6_cb",
+                value=False,
+                disabled=not has6(charm_name),
+            )
+        )
+
+    with right:
+        st.subheader("Rings")
+        rings_df = equip[
+            equip["slot"].astype(str).str.strip().str.lower() == "ring"
+        ].copy()
+        ring_opts = ["(Empty)"] + rings_df["name"].tolist()
+        colR1, colR2 = st.columns(2)
+        ring_choices, ring_star6_flags = [], []
+        for i in range(1, 9):
+            col = colR1 if i <= 4 else colR2
+            with col:
+                choice = st.selectbox(
+                    f"Ring {i}", ring_opts, key=f"ring_sel_{i}", index=0
+                )
+                star6 = False
+                if choice != "(Empty)":
+                    star6 = st.checkbox(
+                        "6★",
+                        key=f"ring_star6_{i}",
+                        value=False,
+                        disabled=not has6(choice),
+                    )
+                ring_choices.append(choice)
+                ring_star6_flags.append(star6)
+
+    # Enchants, Potions, Buffs
+    st.subheader("Enchants, Potions & Buffs")
+    c1, c2, c3, c4 = st.columns(4)
+    with c1:
+        ench_name = st.selectbox(
+            "Pan Enchant", enchants["name"].tolist(), key="ench_select"
+        )
+    with c2:
+        pot_sel = st.multiselect(
+            "Potions (stacking)",
+            potions["name"].tolist(),
+            key="potions_select",
+            default=[],
+        )
+    with c3:
+        buff_sel = st.multiselect(
+            "Permanent Buffs", buffs["name"].tolist(), key="buffs_select", default=[]
+        )
+    with c4:
+        login_bonus_luck = st.number_input(
+            "Extra Luck from login days",
+            key="login_bonus_luck",
+            value=0,
+            step=1,
+            min_value=0,
+        )
+
+    # Totems & Overhead
+    st.subheader("Totems & Overhead")
+    t1, t2, t3, t4 = st.columns(4)
+    with t1:
+        meteor = st.checkbox("Meteor active (Luck ×2)", key="meteor_cb", value=False)
+    with t2:
+        luck_totem = st.checkbox(
+            "Luck Totem (Luck ×2)", key="luck_totem_cb", value=False
+        )
+    with t3:
+        str_totem = st.checkbox(
+            "Strength Totem (STR ×2)", key="str_totem_cb", value=False
+        )
+    with t4:
+        overhead_s = st.number_input(
+            "Overhead per pan (s)", key="overhead_seconds", value=3.0, step=0.1
+        )
+
+    luck_mult = (2.0 if meteor else 1.0) * (2.0 if luck_totem else 1.0)
+    str_mult = 2.0 if str_totem else 1.0
+
+    # Build item list
+    items = []
+    if neck_name != "(Empty)":
+        nrow = neck_df[neck_df["name"] == neck_name]
+        if not nrow.empty:
+            items.append(
+                row_to_item(
+                    nrow.iloc[0], neck_star6, overrides=equip6_map.get(neck_name)
+                )
+            )
+    if charm_name != "(Empty)":
+        crow = charm_df[charm_df["name"] == charm_name]
+        if not crow.empty:
+            items.append(
+                row_to_item(
+                    crow.iloc[0], charm_star6, overrides=equip6_map.get(charm_name)
+                )
+            )
+    for choice, is6 in zip(ring_choices, ring_star6_flags):
+        if choice == "(Empty)":
+            continue
+        rrow = rings_df[rings_df["name"] == choice]
+        if not rrow.empty:
+            items.append(
+                row_to_item(rrow.iloc[0], is6, overrides=equip6_map.get(choice))
+            )
+
+    # Resolve rows
+    ench_row = (
+        enchants[enchants["name"] == ench_name].iloc[0]
+        if len(enchants[enchants["name"] == ench_name])
+        else None
+    )
+    pot_names = set(potions["name"].tolist())
+    buff_names = set(buffs["name"].tolist())
+    potion_rows = [
+        potions[potions["name"] == n].iloc[0] for n in pot_sel if n in pot_names
+    ]
+    buff_rows = [buffs[buffs["name"] == n].iloc[0] for n in buff_sel if n in buff_names]
+
+    # Compute n show results
+    totals, res = compute_once(
+        pan,
+        dict(shovel),
+        items,
+        ench_row,
+        potion_rows,
+        buff_rows,
+        luck_mult,
+        str_mult,
+        overhead_s,
+        login_bonus_luck,
+    )
+
+    st.markdown(
+        '<h2 style="font-size:2.0rem;margin:0.25rem 0 0.75rem 0">Results</h2>',
+        unsafe_allow_html=True,
+    )
+    st.subheader("Build Stats (Totals)")
+    stats_cols = st.columns(4)
+    with stats_cols[0]:
+        st.write(f"**Luck:** {int(totals['luck'])}")
+        st.write(f"**Dig Strength:** {totals['dig_str']:.1f}")
+    with stats_cols[1]:
+        st.write(f"**Capacity:** {int(totals['capacity'])}")
+        st.write(f"**Dig Speed %:** {totals['dig_speed']:.1f}%")
+    with stats_cols[2]:
+        st.write(f"**Shake Strength:** {totals['shake_str']:.1f}")
+        st.write(f"**Shake Speed %:** {totals['shake_speed']:.1f}%")
+    with stats_cols[3]:
+        st.write(f"**Sell Boost:** {totals['sell']:.1f}%")
+        st.write(f"**Size Boost:** {totals['size']:.1f}%")
+
+    st.subheader("Derived (from build)")
+    d1, d2 = st.columns(2)
+    with d1:
+        st.write(f"**Luck (effective):** {int(res['eff_luck']):,}")
+        st.write(f"**Shake STR (effective):** {res['eff_shake_str']:.2f}")
+    with d2:
+        st.write(f"**Shakes:** {res['shakes']}")
+        st.write(f"**Time / pan:** {res['time_per_pan_s']:.3f} s")
+
+    st.subheader("Key metrics")
+    k1, k2 = st.columns(2)
+    with k1:
+        st.markdown(f"### Efficiency: {int(res['efficiency']):,}")
+        st.caption("Efficiency = (Luck_eff × √Capacity) / (Time × 0.65)")
+    with k2:
+        st.markdown(f"### Profit rate: {int(res['profit_rate']):,}")
+        st.caption("Profit rate = Efficiency × (1 + Sell/100)")
+
+    # MC
+    st.divider()
+    st.markdown("#### Monte Carlo (optional)")
+
+    mc_toggle = st.checkbox(
+        "Run Monte Carlo for overhead variance", key="mc_toggle_planner"
+    )
+    if mc_toggle:
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            mu = st.number_input(
+                "Overhead mean (s)",
+                value=float(overhead_s),
+                step=0.1,
+                key="mc_mu_planner",
+            )
+        with c2:
+            sigma = st.number_input(
+                "Overhead std dev (s)", value=0.3, step=0.05, key="mc_sigma_planner"
+            )
+        with c3:
+            runs = st.number_input(
+                "Runs", value=400, step=50, min_value=50, key="mc_runs_planner"
+            )
+        c4, c5 = st.columns(2)
+        with c4:
+            omin = st.number_input(
+                "Overhead min (s)",
+                value=max(0.0, float(overhead_s) - 1.0),
+                step=0.1,
+                key="mc_min_planner",
+            )
+        with c5:
+            omax = st.number_input(
+                "Overhead max (s)",
+                value=float(overhead_s) + 1.0,
+                step=0.1,
+                key="mc_max_planner",
+            )
+
+        summary = mc_overhead_sim(
+            pan,
+            dict(shovel),
+            items,
+            ench_row,
+            potion_rows,
+            buff_rows,
+            luck_mult,
+            str_mult,
+            mu,
+            sigma,
+            omin,
+            omax,
+            login_bonus_luck,
+            runs=int(runs),
+        )
+        st.write(
+            f"**Time / pan:** {summary['time_mean']:.3f} ± {summary['time_std']:.3f} s"
+        )
+        st.write(
+            f"**Efficiency:** {summary['eff_mean']:.0f} ± {summary['eff_std']:.0f}"
+        )
+        st.write(
+            f"**Profit rate:** {summary['prof_mean']:.0f} ± {summary['prof_std']:.0f}"
+        )
+
+    # Selected
+    st.divider()
+    st.markdown("#### Selected Items")
+    _df_items = pd.DataFrame(items)
+    _cols = [
+        "name",
+        "star6",
+        "luck",
+        "dig_str",
+        "capacity",
+        "dig_speed",
+        "shake_str",
+        "shake_speed",
+        "sell",
+        "size",
+        "modifier",
+    ]
+    if _df_items.empty:
+        _df_items = pd.DataFrame(columns=_cols)
+    else:
+        _df_items = _df_items.reindex(columns=_cols, fill_value=0)
+    st.dataframe(_df_items, use_container_width=True)
+
+    # Export/Import
+    st.divider()
+    st.markdown("### Presets — Save / Load")
+    current_build = {
+        "pan_name": pan["name"],
+        "shovel_name": shovel["name"],
+        "neck": {"name": neck_name, "star6": bool(neck_star6)},
+        "charm": {"name": charm_name, "star6": bool(charm_star6)},
+        "rings": [
+            {"name": ring_choices[i], "star6": bool(ring_star6_flags[i])}
+            for i in range(len(ring_choices))
+        ],
+        "enchant": ench_name,
+        "potions": pot_sel,
+        "buffs": buff_sel,
+        "login_bonus_luck": int(login_bonus_luck),
+        "meteor": bool(meteor),
+        "luck_totem": bool(luck_totem),
+        "str_totem": bool(str_totem),
+        "overhead_s": float(overhead_s),
+    }
+
+    colP1, colP2 = st.columns(2)
+    with colP1:
+        st.markdown("#### Export current build")
+        export_json = json.dumps(current_build, indent=2)
+        with st.expander("Preview export JSON", expanded=False):
+            st.code(export_json, language="json")
+        st.download_button(
+            "Download build JSON",
+            export_json,
+            file_name="prospecting_build.json",
+            mime="application/json",
+        )
+
+    with colP2:
+        st.markdown("#### Import build (paste JSON)")
+        with st.form("import_form_bottom", clear_on_submit=False):
+            pasted = st.text_area(
+                "Paste build JSON here",
+                key="import_text_bottom",
+                height=160,
+                placeholder="{ ... }",
+            )
+            submitted = st.form_submit_button("Load pasted build")
+        if submitted:
+            try:
+                payload = json.loads(pasted) if pasted and pasted.strip() else None
+                if payload:
+                    st.session_state["pan_select"] = payload.get(
+                        "pan_name", st.session_state.get("pan_select")
+                    )
+                    st.session_state["shovel_select"] = payload.get(
+                        "shovel_name", st.session_state.get("shovel_select")
+                    )
+                    st.session_state["neck_select"] = (
+                        payload.get("neck", {}) or {}
+                    ).get("name", "(Empty)")
+                    st.session_state["neck_star6_cb"] = bool(
+                        (payload.get("neck", {}) or {}).get("star6", False)
+                    )
+                    st.session_state["charm_select"] = (
+                        payload.get("charm", {}) or {}
+                    ).get("name", "(Empty)")
+                    st.session_state["charm_star6_cb"] = bool(
+                        (payload.get("charm", {}) or {}).get("star6", False)
+                    )
+                    rings = payload.get("rings", []) or []
+                    for i in range(8):
+                        st.session_state[f"ring_sel_{i+1}"] = (
+                            rings[i]["name"]
+                            if i < len(rings) and isinstance(rings[i], dict)
+                            else "(Empty)"
+                        )
+                        st.session_state[f"ring_star6_{i+1}"] = (
+                            bool(rings[i].get("star6", False))
+                            if i < len(rings) and isinstance(rings[i], dict)
+                            else False
+                        )
+                    st.session_state["ench_select"] = payload.get(
+                        "enchant", st.session_state.get("ench_select")
+                    )
+                    st.session_state["potions_select"] = (
+                        payload.get("potions", []) or []
+                    )
+                    st.session_state["buffs_select"] = payload.get("buffs", []) or []
+                    st.session_state["login_bonus_luck"] = int(
+                        payload.get("login_bonus_luck", 0)
+                    )
+                    st.session_state["meteor_cb"] = bool(payload.get("meteor", False))
+                    st.session_state["luck_totem_cb"] = bool(
+                        payload.get("luck_totem", False)
+                    )
+                    st.session_state["str_totem_cb"] = bool(
+                        payload.get("str_totem", False)
+                    )
+                    st.session_state["overhead_seconds"] = float(
+                        payload.get("overhead_s", 3.0)
+                    )
+                    st.success("Build imported. Rerunning to apply controls.")
+                    st.rerun()
+                else:
+                    st.warning("No JSON found.")
+            except Exception as e:
+                st.error(f"Failed to parse JSON: {e}")
+
+# Optimizer
+with tab_opt:
+    st.subheader("Optimize / Generate Build (BETA)")
+
+    # Pools
+    neck_df_all = equip[
+        equip["slot"].astype(str).str.strip().str.lower() == "necklace"
+    ].copy()
+    charm_df_all = equip[
+        equip["slot"].astype(str).str.strip().str.lower() == "charm"
+    ].copy()
+    ring_df_all = equip[
+        equip["slot"].astype(str).str.strip().str.lower() == "ring"
+    ].copy()
+
+    all_pans = pans["name"].tolist()
+    all_shovels = shovels["name"].tolist()
+    all_enchants = enchants["name"].tolist()
+
+    # Budgets / search settings
+    b1, b2, b3 = st.columns(3)
+    with b1:
+        # Limit number of Enchants considered
+        max_enchants = st.number_input(
+            "Max Enchants to explore",
+            value=min(100, len(all_enchants)),
+            min_value=1,
+            step=10,
+        )
+    with b2:
+        neck_charm_shortlist = st.number_input(
+            "Neck/Charm shortlist per combo", value=6, min_value=1, step=1
+        )
+    with b3:
+        ring_shortlist = st.number_input(
+            "Ring shortlist size", value=30, min_value=5, step=5
+        )
+
+    b4, b5, b6 = st.columns(3)
+    with b4:
+        search_runs = st.number_input(
+            "Greedy builds per shortlist", value=12, min_value=1, step=1
+        )
+    with b5:
+        jitter_pct = st.number_input(
+            "Greedy jitter (±%)", value=1.0, min_value=0.0, step=0.5
+        )
+    with b6:
+        rand_seed = st.number_input(
+            "Random seed", value=42, min_value=0, step=1, key="rand_seed_opt"
+        )
+
+    # Objective / constraints
+    ctop1, ctop2, ctop3 = st.columns(3)
+    with ctop1:
+        objective = st.selectbox(
+            "Objective",
+            ["Mythic/Exotics rate (Efficiency)", "Making Money (Profit rate)"],
+        )
+    with ctop2:
+        allow_dupes = st.checkbox("Allow duplicate rings", value=True)
+    with ctop3:
+        include_empty = st.checkbox("Allow empty ring slots", value=False)
+
+    st.markdown("### Whitelists & Limits")
+    # Pans/Shovels
+    ps1, ps2 = st.columns(2)
+    with ps1:
+        pan_choice = st.selectbox(
+            "Pan (exactly one)",
+            options=all_pans,
+            index=(
+                all_pans.index(st.session_state.get("pan_select", all_pans[0]))
+                if all_pans
+                else 0
+            ),
+            key="wl_pan_choice",
+        )
+    with ps2:
+        shv_choice = st.selectbox(
+            "Shovel (exactly one)",
+            options=all_shovels,
+            index=(
+                all_shovels.index(st.session_state.get("shovel_select", all_shovels[0]))
+                if all_shovels
+                else 0
+            ),
+            key="wl_shovel_choice",
+        )
+
+    # Enchants
+    ench_wl = st.multiselect(
+        "Enchants (no limit)",
+        options=all_enchants,
+        default=all_enchants,
+        key="wl_enchants_fast",
+    )
+
+    # Helper to enforce max=4
+    def enforce_max4(lst, label):
+        if len(lst) > 4:
+            st.info(f"{label}: using first 4 of {len(lst)} selections.")
+            return lst[:4]
+        return lst
+
+    with st.expander("Necklaces (max 4 used)", expanded=False):
+        neck_wl = st.multiselect(
+            "Use these necklaces",
+            options=neck_df_all["name"].tolist(),
+            default=neck_df_all["name"].tolist(),
+            key="wl_necks_fast",
+        )
+        neck_wl = enforce_max4(neck_wl, "Necklaces")
+
+    with st.expander("Charms (max 4 used)", expanded=False):
+        charm_wl = st.multiselect(
+            "Use these charms",
+            options=charm_df_all["name"].tolist(),
+            default=charm_df_all["name"].tolist(),
+            key="wl_charms_fast",
+        )
+        charm_wl = enforce_max4(charm_wl, "Charms")
+
+    with st.expander("Rings (max 4 used)", expanded=False):
+        ring_wl = st.multiselect(
+            "Use these rings",
+            options=ring_df_all["name"].tolist(),
+            default=ring_df_all["name"].tolist(),
+            key="wl_rings_fast",
+        )
+        ring_wl = enforce_max4(ring_wl, "Rings")
+
+    # Toggles / MC verification settings
+    t1, t2, t3, t4 = st.columns(4)
+    with t1:
+        meteor = st.checkbox(
+            "Meteor active (Luck ×2)",
+            value=bool(st.session_state.get("meteor_cb", False)),
+            key="meteor_fast",
+        )
+    with t2:
+        luck_totem = st.checkbox(
+            "Luck Totem (Luck ×2)",
+            value=bool(st.session_state.get("luck_totem_cb", False)),
+            key="luck_fast",
+        )
+    with t3:
+        str_totem = st.checkbox(
+            "Strength Totem (STR ×2)",
+            value=bool(st.session_state.get("str_totem_cb", False)),
+            key="str_fast",
+        )
+    with t4:
+        overhead_s = st.number_input(
+            "Overhead per pan (s)",
+            value=float(st.session_state.get("overhead_seconds", 3.0)),
+            step=0.1,
+            key="overhead_fast",
+        )
+
+    luck_mult = (2.0 if meteor else 1.0) * (2.0 if luck_totem else 1.0)
+    str_mult = 2.0 if str_totem else 1.0
+    login_bonus_luck = st.number_input(
+        "Extra Luck from login days",
+        value=int(st.session_state.get("login_bonus_luck", 0)),
+        step=1,
+        min_value=0,
+    )
+
+    mc1, mc2, mc3 = st.columns(3)
+    with mc1:
+        mc_runs = st.number_input(
+            "MC runs per candidate", value=300, min_value=50, step=50, key="mc_runs_opt"
+        )
+    with mc2:
+        mc_sigma = st.number_input(
+            "Overhead std dev (s)", value=0.3, step=0.05, key="mc_sigma_opt"
+        )
+    with mc3:
+        mc_range = st.slider(
+            "Overhead clamp range (±s)", 0.0, 2.0, 1.0, 0.1, key="mc_range_opt"
+        )
+
+    overhead_min = max(0.0, overhead_s - mc_range)
+    overhead_max = overhead_s + mc_range
+
+    # Helper shortlist functions
+    def shortlist_neck_charm(pan, shovel, ench_row, neck_df, charm_df, k):
+        pairs_scores = []
+        for _, n in neck_df.iterrows():
+            n_item = row_to_item(n, False, {})
+            for _, c in charm_df.iterrows():
+                c_item = row_to_item(c, False, {})
+                items = [n_item, c_item]
+                _, res = compute_once(
+                    pan,
+                    shovel,
+                    items,
+                    ench_row,
+                    [],
+                    [],
+                    luck_mult,
+                    str_mult,
+                    overhead_s,
+                    login_bonus_luck,
+                )
+                pairs_scores.append(((n_item, c_item), score_from_res(res, objective)))
+        pairs_scores.sort(key=lambda x: x[1], reverse=True)
+        return [pair for pair, _ in pairs_scores[: int(k)]]
+
+    def shortlist_rings(
+        pan, shovel, ench_row, base_items, ring_df, size, allow_dupes, include_empty
+    ):
+        candidates = []
+        if include_empty:
+            candidates.append(empty_item("(Empty)"))
+        lone_scores = []
+        for _, r in ring_df.iterrows():
+            ring = row_to_item(r, False, {})
+            test = base_items + [ring]
+            _, res = compute_once(
+                pan,
+                shovel,
+                test,
+                ench_row,
+                [],
+                [],
+                luck_mult,
+                str_mult,
+                overhead_s,
+                login_bonus_luck,
+            )
+            lone_scores.append((ring, score_from_res(res, objective)))
+        lone_scores.sort(key=lambda x: x[1], reverse=True)
+        for ring, _ in lone_scores[: int(size)]:
+            candidates.append(ring)
+        return candidates
+
+    def greedy_fill(
+        pan,
+        shovel,
+        ench_row,
+        base_items,
+        ring_candidates,
+        runs,
+        jitter_pct,
+        allow_dupes,
+        seed,
+    ):
+        rng = np.random.default_rng(seed)
+        best_build, best_score = None, -1e99
+        for _ in range(int(runs)):
+            chosen, used = [], set()
+            for _slot in range(8):
+                local_best, local_best_score = None, -1e99
+                for cand in ring_candidates:
+                    if (
+                        cand["name"] != "(Empty)"
+                        and (not allow_dupes)
+                        and cand["name"] in used
+                    ):
+                        continue
+                    test = (
+                        base_items
+                        + chosen
+                        + ([] if cand["name"] == "(Empty)" else [cand])
+                    )
+                    _, res = compute_once(
+                        pan,
+                        shovel,
+                        test,
+                        ench_row,
+                        [],
+                        [],
+                        luck_mult,
+                        str_mult,
+                        overhead_s,
+                        login_bonus_luck,
+                    )
+                    s = score_from_res(res, objective) * (
+                        1.0 + rng.normal(0, float(jitter_pct) / 100.0)
+                    )
+                    if s > local_best_score:
+                        local_best_score, local_best = s, cand
+                if local_best and local_best["name"] != "(Empty)":
+                    chosen.append(local_best)
+                    used.add(local_best["name"])
+            _, final_res = compute_once(
+                pan,
+                shovel,
+                base_items + chosen,
+                ench_row,
+                [],
+                [],
+                luck_mult,
+                str_mult,
+                overhead_s,
+                login_bonus_luck,
+            )
+            final_score = score_from_res(final_res, objective)
+            if final_score > best_score:
+                best_score, best_build = final_score, dict(
+                    items=(base_items + chosen), res=final_res
+                )
+        return best_build
+
+    # Run Optimizer
+    if st.button("Run Optimizer"):
+        with st.spinner("Searching…"):
+            # Filter whitelists & limit enchants
+            neck_df = neck_df_all[neck_df_all["name"].isin(neck_wl)].copy()
+            charm_df = charm_df_all[charm_df_all["name"].isin(charm_wl)].copy()
+            ring_df = ring_df_all[ring_df_all["name"].isin(ring_wl)].copy()
+
+            ench_df = enchants[enchants["name"].isin(ench_wl)].copy()
+            if ench_df.empty:
+                st.error("Please select at least one Enchant.")
+                st.stop()
+            ench_list = ench_df["name"].tolist()[: int(max_enchants)]
+
+            # uild combos across chosen pan/shovel and limited enchants
+            combos = [(pan_choice, shv_choice, e) for e in ench_list]
+
+            progress = st.progress(0, text="Initializing…")
+            builds = []
+            total_steps = max(1, len(combos))
+
+            for idx, (pname, sname, ename) in enumerate(combos, start=1):
+                progress.progress(
+                    min(1.0, idx / total_steps),
+                    text=f"Combo {idx}/{total_steps}: {pname} × {sname} × {ename}",
+                )
+                prow = pans[pans["name"] == pname].iloc[0]
+                srow = shovels[shovels["name"] == sname].iloc[0]
+                pan = dict(
+                    name=prow["name"],
+                    luck=float(prow["luck"]),
+                    capacity=float(prow["capacity"]),
+                    shake_str=float(prow["shake_str"]),
+                    shake_speed_mult=float(prow["shake_speed_mult"]),
+                )
+                shovel = dict(
+                    name=srow["name"],
+                    dig_str=float(srow["dig_str"]),
+                    dig_speed_mult=float(srow["dig_speed_mult"]),
+                    toughness=float(srow["toughness"]),
+                )
+                ench_row = enchants[enchants["name"] == ename].iloc[0]
+
+                # shortlist neck/charm
+                nc_pairs = shortlist_neck_charm(
+                    pan,
+                    shovel,
+                    ench_row,
+                    neck_df,
+                    charm_df,
+                    k=int(neck_charm_shortlist),
+                )
+
+                for n_item, c_item in nc_pairs:
+                    base_items = [n_item, c_item]
+                    ring_cands = shortlist_rings(
+                        pan,
+                        shovel,
+                        ench_row,
+                        base_items,
+                        ring_df,
+                        size=int(ring_shortlist),
+                        allow_dupes=allow_dupes,
+                        include_empty=include_empty,
+                    )
+                    best = greedy_fill(
+                        pan,
+                        shovel,
+                        ench_row,
+                        base_items,
+                        ring_cands,
+                        runs=int(search_runs),
+                        jitter_pct=jitter_pct,
+                        allow_dupes=allow_dupes,
+                        seed=int(rand_seed),
+                    )
+                    if best:
+                        item_names = [i["name"] for i in best["items"]]
+                        builds.append(
+                            dict(
+                                pan_name=pname,
+                                shovel_name=sname,
+                                ench_name=ename,
+                                neck=n_item["name"],
+                                charm=c_item["name"],
+                                items=best["items"],
+                                res=best["res"],
+                                item_names=item_names,
+                            )
+                        )
+
+            progress.progress(1.0, text="Ranking results…")
+
+            if not builds:
+                st.error(
+                    "No candidates found. Try increasing budgets/shortlists or whitelisting more gear."
+                )
+            else:
+                # Rank by objective
+                builds.sort(
+                    key=lambda d: score_from_res(d["res"], objective), reverse=True
+                )
+                top_show = min(15, len(builds))
+                st.markdown("#### Top deterministic candidates")
+                rows = []
+                for i in range(top_show):
+                    b = builds[i]
+                    res = b["res"]
+                    rows.append(
+                        dict(
+                            Rank=i + 1,
+                            Pan=b["pan_name"],
+                            Shovel=b["shovel_name"],
+                            Enchant=b["ench_name"],
+                            Neck=b["neck"],
+                            Charm=b["charm"],
+                            Efficiency=int(res["efficiency"]),
+                            Profit=int(res["profit_rate"]),
+                            Shakes=res["shakes"],
+                            Time=f"{res['time_per_pan_s']:.3f}s",
+                        )
+                    )
+                st.dataframe(pd.DataFrame(rows), use_container_width=True)
+
+                # MC verify top N
+                st.markdown("#### Monte Carlo verification")
+                top_k = min(8, len(builds))
+                ver_rows = []
+                # Cache lookups to avoid repeated DF indexing
+                pan_map = pans.set_index("name").to_dict(orient="index")
+                shv_map = shovels.set_index("name").to_dict(orient="index")
+                ench_map = enchants.set_index("name").to_dict(orient="index")
+                for i in range(top_k):
+                    b = builds[i]
+                    p = pan_map[b["pan_name"]]
+                    s = shv_map[b["shovel_name"]]
+                    e = ench_map[b["ench_name"]]
+                    mc = mc_overhead_sim(
+                        dict(
+                            name=b["pan_name"],
+                            luck=float(p["luck"]),
+                            capacity=float(p["capacity"]),
+                            shake_str=float(p["shake_str"]),
+                            shake_speed_mult=float(p["shake_speed_mult"]),
+                        ),
+                        dict(
+                            name=b["shovel_name"],
+                            dig_str=float(s["dig_str"]),
+                            dig_speed_mult=float(s["dig_speed_mult"]),
+                            toughness=float(s.get("toughness", 0)),
+                        ),
+                        b["items"],
+                        e,
+                        [],
+                        [],
+                        luck_mult,
+                        str_mult,
+                        float(overhead_s),
+                        float(mc_sigma),
+                        float(overhead_min),
+                        float(overhead_max),
+                        int(login_bonus_luck),
+                        runs=int(mc_runs),
+                        seed=int(rand_seed) + i,
+                    )
+                    b["mc_eff_mean"] = mc["eff_mean"]
+                    b["mc_eff_std"] = mc["eff_std"]
+                    b["mc_prof_mean"] = mc["prof_mean"]
+                    b["mc_prof_std"] = mc["prof_std"]
+                    b["mc_time_mean"] = mc["time_mean"]
+                    b["mc_time_std"] = mc["time_std"]
+                    ver_rows.append(
+                        dict(
+                            Pan=b["pan_name"],
+                            Shovel=b["shovel_name"],
+                            Enchant=b["ench_name"],
+                            Neck=b["neck"],
+                            Charm=b["charm"],
+                            Eff_mean=int(mc["eff_mean"]),
+                            Eff_std=f"{mc['eff_std']:.1f}",
+                            Profit_mean=int(mc["prof_mean"]),
+                            Profit_std=f"{mc['prof_std']:.1f}",
+                            Time_mean=f"{mc['time_mean']:.3f}s",
+                            Time_std=f"{mc['time_std']:.3f}s",
+                        )
+                    )
+                st.dataframe(pd.DataFrame(ver_rows), use_container_width=True)
+
+                # Choose MC best
+                if objective.startswith("Mythic"):
+                    best = max(builds[:top_k], key=lambda b: b["mc_eff_mean"])
+                else:
+                    best = max(builds[:top_k], key=lambda b: b["mc_prof_mean"])
+
+                # Build an export payload for Planner
+                neck_name = best["neck"]
+                charm_name = best["charm"]
+                rings_struct = [
+                    {"name": nm, "star6": False}
+                    for nm in best["item_names"]
+                    if nm not in (neck_name, charm_name)
+                ]
+                while len(rings_struct) < 8:
+                    rings_struct.append({"name": "(Empty)", "star6": False})
+
+                best_build = {
+                    "pan_name": best["pan_name"],
+                    "shovel_name": best["shovel_name"],
+                    "neck": {"name": neck_name, "star6": False},
+                    "charm": {"name": charm_name, "star6": False},
+                    "rings": rings_struct,
+                    "enchant": best["ench_name"],
+                    "potions": [],
+                    "buffs": [],
+                    "login_bonus_luck": int(login_bonus_luck),
+                    "meteor": bool(meteor),
+                    "luck_totem": bool(luck_totem),
+                    "str_totem": bool(str_totem),
+                    "overhead_s": float(overhead_s),
+                }
+
+                st.success(
+                    f"MC-best by {'Efficiency' if objective.startswith('Mythic') else 'Profit'} → Pan {best['pan_name']} | Shovel {best['shovel_name']} | Enchant {best['ench_name']}"
+                )
+
+                c1, c2 = st.columns(2)
+                with c1:
+                    if st.button("Apply best build to Planner (Broken ATM)"):
+                        # Use session_state handoff to Planner tab
+                        st.session_state["pending_import_payload"] = best_build
+                        (
+                            st.switch_page("streamlit_app.py")
+                            if hasattr(st, "switch_page")
+                            else st.experimental_rerun()
+                        )
+                with c2:
+                    st.download_button(
+                        "Download best build JSON",
+                        json.dumps(best_build, indent=2),
+                        file_name="best_build.json",
+                        mime="application/json",
+                    )
