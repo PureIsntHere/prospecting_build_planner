@@ -71,38 +71,46 @@ def load_csvs():
     pans = pd.read_csv("pans.csv")
     shovels = pd.read_csv("shovels.csv")
 
-    # Normalize types
     for df, cols in [
-        (pans, ["name", "luck", "capacity", "shake_str", "shake_speed_mult"]),
-        (shovels, ["name", "dig_str", "dig_speed_mult", "toughness"]),
+        (pans,    ["name","luck","capacity","shake_str","shake_speed_mult","sell","size","modifier","passives"]),
+        (shovels, ["name","dig_str","dig_speed_mult","toughness","sell","size","modifier"]),
     ]:
         for c in cols:
             if c not in df.columns:
-                df[c] = 0 if c != "name" else "(Unnamed)"
-        if "luck" in df:
-            df["luck"] = pd.to_numeric(df["luck"], errors="coerce").fillna(0.0)
-        if "capacity" in df:
-            df["capacity"] = pd.to_numeric(df["capacity"], errors="coerce").fillna(0.0)
-        if "shake_str" in df:
-            df["shake_str"] = pd.to_numeric(df["shake_str"], errors="coerce").fillna(
-                0.0
-            )
-        if "shake_speed_mult" in df:
-            df["shake_speed_mult"] = pd.to_numeric(
-                df["shake_speed_mult"], errors="coerce"
-            ).fillna(1.0)
-        if "dig_str" in df:
-            df["dig_str"] = pd.to_numeric(df["dig_str"], errors="coerce").fillna(0.0)
-        if "dig_speed_mult" in df:
-            df["dig_speed_mult"] = pd.to_numeric(
-                df["dig_speed_mult"], errors="coerce"
-            ).fillna(1.0)
-        if "toughness" in df:
-            df["toughness"] = pd.to_numeric(df["toughness"], errors="coerce").fillna(
-                0.0
-            )
+                df[c] = "" if c in ("name","passives") else 0.0
+
+    for df, cols in [
+        (pans,    ["luck","capacity","shake_str","shake_speed_mult","sell","size","modifier"]),
+        (shovels, ["dig_str","dig_speed_mult","toughness","sell","size","modifier"]),
+    ]:
+        for c in cols:
+            df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0.0)
+
+    import re
+    def _parse_passives(text: str):
+        sell = size = modifier = 0.0
+        if isinstance(text, str) and text.strip():
+            t = text.lower().replace("boost", "").replace("%", "")
+            for kind, val in re.findall(r"(size|modifier|sell)\s*([+\-]?\d+(?:\.\d+)?)", t):
+                v = float(val)
+                if kind == "size":      size += v
+                elif kind == "modifier": modifier += v
+                elif kind == "sell":     sell += v
+        return sell, size, modifier
+
+    if "passives" in pans.columns:
+        for i, txt in pans["passives"].items():
+            se, si, mo = _parse_passives(txt)
+
+            if (not np.isfinite(pans.loc[i, "sell"])) or pans.loc[i, "sell"] == 0.0:
+                pans.loc[i, "sell"] = se
+            if (not np.isfinite(pans.loc[i, "size"])) or pans.loc[i, "size"] == 0.0:
+                pans.loc[i, "size"] = si
+            if (not np.isfinite(pans.loc[i, "modifier"])) or pans.loc[i, "modifier"] == 0.0:
+                pans.loc[i, "modifier"] = mo
 
     return equip, equip6_map, ench, pots, buffs, pans, shovels
+
 
 
 def row_to_item(row, star6, overrides=None):
@@ -143,10 +151,11 @@ def compute_once(
         dig_str=float(shovel["dig_str"]),
         dig_speed=0.0,
         shake_speed=0.0,
-        sell=0.0,
-        size=0.0,
-        modifier=0.0,
+        sell=float(pan.get("sell", 0.0)) + float(shovel.get("sell", 0.0)),
+        size=float(pan.get("size", 0.0)) + float(shovel.get("size", 0.0)),
+        modifier=float(pan.get("modifier", 0.0)) + float(shovel.get("modifier", 0.0)),
     )
+
 
     # Equipment (6 star  overrides if toggled on that item)
     for it in items:
@@ -344,7 +353,7 @@ st.caption("Build Planner and Build Generator")
 equip, equip6_map, enchants, potions, buffs, pans, shovels = load_csvs()
 
 # Info
-tab_info, tab_build, tab_opt = st.tabs(["Information", "Build Planner", "Optimizer"])
+tab_info, tab_build, tab_opt = st.tabs(["Information", "Build Planner", "Optimizer(BETA)"])
 
 with tab_info:
     st.markdown("## What the stats mean")
@@ -382,6 +391,7 @@ with tab_info:
     st.markdown("## Notes")
     st.markdown(
         """
+- This isnt the same value as the CSV everyones using!?! , That csv isnt accurate. This tool properly tracks 6 Star Stats and Pan Passives which have been ignored by the community csv
 - The optimizer may not find the absolute best build due to the complexity of the search space.
 - Always double-check the suggested builds and adjust based on your playstyle and preferences.
 - If you encounter any issues or have suggestions, please reach out to the ItsPure on discord.
@@ -409,12 +419,19 @@ with tab_build:
             capacity=float(prow["capacity"]),
             shake_str=float(prow["shake_str"]),
             shake_speed_mult=float(prow["shake_speed_mult"]),
+            sell=float(prow.get("sell", 0.0)),
+            size=float(prow.get("size", 0.0)),
+            modifier=float(prow.get("modifier", 0.0)),
         )
+
         shovel = dict(
             name=srow["name"],
             dig_str=float(srow["dig_str"]),
             dig_speed_mult=float(srow["dig_speed_mult"]),
             toughness=float(srow["toughness"]),
+            sell=float(srow.get("sell", 0.0)),
+            size=float(srow.get("size", 0.0)),
+            modifier=float(srow.get("modifier", 0.0)),
         )
 
         st.caption(
@@ -595,25 +612,32 @@ with tab_build:
         anim_mult=anim_mult,
     )
 
+    base_dig_pct   = 100.0 + (float(shovel.get("dig_speed_mult", 1.0)) - 1.0) * 100.0
+    base_shake_pct = 100.0
+    dig_speed_ui   = totals.get("dig_speed", 0.0) + base_dig_pct
+    shake_speed_ui = totals.get("shake_speed", 0.0) + base_shake_pct
+
     st.markdown(
         '<h2 style="font-size:2.0rem;margin:0.25rem 0 0.75rem 0">Results</h2>',
         unsafe_allow_html=True,
     )
     st.subheader("Build Stats (Totals)")
-    stats_cols = st.columns(4)
+    stats_cols = st.columns(5)
     with stats_cols[0]:
         st.write(f"**Luck:** {int(totals['luck'])}")
         st.write(f"**Dig Strength:** {totals['dig_str']:.1f}")
     with stats_cols[1]:
         st.write(f"**Capacity:** {int(totals['capacity'])}")
-        st.write(f"**Dig Speed %:** {totals['dig_speed']:.1f}%")
+        st.write(f"**Dig Speed %:** {dig_speed_ui:.1f}%")
     with stats_cols[2]:
         st.write(f"**Shake Strength:** {totals['shake_str']:.1f}")
-        st.write(f"**Shake Speed %:** {totals['shake_speed']:.1f}%")
+        st.write(f"**Shake Speed %:** {shake_speed_ui:.1f}%")
     with stats_cols[3]:
         st.write(f"**Sell Boost:** {totals['sell']:.1f}%")
         st.write(f"**Size Boost:** {totals['size']:.1f}%")
-
+    with stats_cols[4]:
+        st.write(f"**Modifier Boost:** {totals['modifier']:.1f}%")
+        st.write(f"**Toughness:** {shovel['toughness']:}")
     st.subheader("Derived (from build)")
     d1, d2 = st.columns(2)
     with d1:
@@ -823,7 +847,7 @@ with tab_build:
 
 # Optimizer
 with tab_opt:
-    st.subheader("Optimize / Generate Build")
+    st.subheader("Optimize / Generate Build(BETA)")
 
     # Pools
     neck_df_all = equip[
@@ -1195,19 +1219,29 @@ with tab_opt:
                 )
                 prow = pans[pans["name"] == pname].iloc[0]
                 srow = shovels[shovels["name"] == sname].iloc[0]
-                pan = dict(
-                    name=prow["name"],
-                    luck=float(prow["luck"]),
-                    capacity=float(prow["capacity"]),
-                    shake_str=float(prow["shake_str"]),
-                    shake_speed_mult=float(prow["shake_speed_mult"]),
+
+                totals = dict(
+                    luck=float(pan["luck"]),
+                    capacity=float(pan["capacity"]),
+                    shake_str=float(pan["shake_str"]),
+                    dig_str=float(shovel["dig_str"]),
+                    dig_speed=0.0,
+                    shake_speed=0.0,
+                    sell=float(pan.get("sell", 0.0)) + float(shovel.get("sell", 0.0)),
+                    size=float(pan.get("size", 0.0)) + float(shovel.get("size", 0.0)),
+                    modifier=float(pan.get("modifier", 0.0)) + float(shovel.get("modifier", 0.0)),
                 )
+
                 shovel = dict(
                     name=srow["name"],
                     dig_str=float(srow["dig_str"]),
                     dig_speed_mult=float(srow["dig_speed_mult"]),
                     toughness=float(srow["toughness"]),
+                    sell=float(srow.get("sell", 0.0)),
+                    size=float(srow.get("size", 0.0)),
+                    modifier=float(srow.get("modifier", 0.0)),
                 )
+
                 ench_row = enchants[enchants["name"] == ename].iloc[0]
 
                 # shortlist neck/charm
