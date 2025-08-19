@@ -1,5 +1,4 @@
-import math
-import json
+import math, json, time
 import numpy as np
 import pandas as pd
 import streamlit as st
@@ -7,27 +6,32 @@ import streamlit as st
 APP_TITLE = "Pures Optimizer"
 BASE_SHAKE_SECONDS = 0.25
 BASE_COLLECT_SECONDS = 2.0
-EFFICIENCY_DIVISOR = 0.65
+ANIM_EXTRA = 0.50  # +50% time when animation calibration is on
 
 
-# Data loading
+# Load Data CSVs
 @st.cache_data
 def load_csvs():
-    """Load all CSVs and build a 6★ override map (only fields that differ)."""
     equip = pd.read_csv("equipment.csv")
 
-    # Optional overrides
+    # Optional 6★ overrides
     equip6_full = None
-    for path in ("equipment_6_full.csv", "equipment_6.csv"):
+    try:
+        equip6_full = pd.read_csv("equipment_6_full.csv")
+    except Exception:
         try:
-            equip6_full = pd.read_csv(path)
-            break
+            equip6_full = pd.read_csv("equipment_6.csv")
         except Exception:
             equip6_full = None
 
     equip6_map = {}
     if equip6_full is not None:
         equip6_full.columns = [c.strip() for c in equip6_full.columns]
+        equip.columns = (
+            [c.strip() for c in equip.columns]
+            if hasattr(equip, "columns")
+            else equip.columns
+        )
         equip.columns = [c.strip() for c in equip.columns]
         numeric_cols = [
             "luck",
@@ -67,37 +71,41 @@ def load_csvs():
     pans = pd.read_csv("pans.csv")
     shovels = pd.read_csv("shovels.csv")
 
-    # Normalize/cast types for pans & shovels
-    if "shake_speed_mult" not in pans.columns:
-        pans["shake_speed_mult"] = 1.0
-    pans["luck"] = pd.to_numeric(pans.get("luck", 0), errors="coerce").fillna(0.0)
-    pans["capacity"] = pd.to_numeric(pans.get("capacity", 0), errors="coerce").fillna(
-        0.0
-    )
-    pans["shake_str"] = pd.to_numeric(pans.get("shake_str", 0), errors="coerce").fillna(
-        0.0
-    )
-    pans["shake_speed_mult"] = pd.to_numeric(
-        pans.get("shake_speed_mult", 1.0), errors="coerce"
-    ).fillna(1.0)
-
-    if "toughness" not in shovels.columns:
-        shovels["toughness"] = 0
-    shovels["dig_str"] = pd.to_numeric(
-        shovels.get("dig_str", 0), errors="coerce"
-    ).fillna(0.0)
-    shovels["dig_speed_mult"] = pd.to_numeric(
-        shovels.get("dig_speed_mult", 1.0), errors="coerce"
-    ).fillna(1.0)
-    shovels["toughness"] = pd.to_numeric(
-        shovels.get("toughness", 0), errors="coerce"
-    ).fillna(0.0)
+    # Normalize types
+    for df, cols in [
+        (pans, ["name", "luck", "capacity", "shake_str", "shake_speed_mult"]),
+        (shovels, ["name", "dig_str", "dig_speed_mult", "toughness"]),
+    ]:
+        for c in cols:
+            if c not in df.columns:
+                df[c] = 0 if c != "name" else "(Unnamed)"
+        if "luck" in df:
+            df["luck"] = pd.to_numeric(df["luck"], errors="coerce").fillna(0.0)
+        if "capacity" in df:
+            df["capacity"] = pd.to_numeric(df["capacity"], errors="coerce").fillna(0.0)
+        if "shake_str" in df:
+            df["shake_str"] = pd.to_numeric(df["shake_str"], errors="coerce").fillna(
+                0.0
+            )
+        if "shake_speed_mult" in df:
+            df["shake_speed_mult"] = pd.to_numeric(
+                df["shake_speed_mult"], errors="coerce"
+            ).fillna(1.0)
+        if "dig_str" in df:
+            df["dig_str"] = pd.to_numeric(df["dig_str"], errors="coerce").fillna(0.0)
+        if "dig_speed_mult" in df:
+            df["dig_speed_mult"] = pd.to_numeric(
+                df["dig_speed_mult"], errors="coerce"
+            ).fillna(1.0)
+        if "toughness" in df:
+            df["toughness"] = pd.to_numeric(df["toughness"], errors="coerce").fillna(
+                0.0
+            )
 
     return equip, equip6_map, ench, pots, buffs, pans, shovels
 
 
 def row_to_item(row, star6, overrides=None):
-    """Convert an equipment DataFrame row to a dict used by compute_once()."""
     return dict(
         name=row["name"],
         luck=float(row.get("luck", 0.0)),
@@ -126,8 +134,8 @@ def compute_once(
     str_mult,
     overhead_s,
     login_bonus_luck,
+    anim_mult: float = 1.0,
 ):
-    """Compute totals and derived metrics for a single build."""
     totals = dict(
         luck=float(pan["luck"]),
         capacity=float(pan["capacity"]),
@@ -140,7 +148,7 @@ def compute_once(
         modifier=0.0,
     )
 
-    # Equipment - 6 star overrides if toggled on that item
+    # Equipment (6 star  overrides if toggled on that item)
     for it in items:
         use_over = (
             bool(it.get("star6"))
@@ -210,7 +218,7 @@ def compute_once(
     eff_luck = totals["luck"] * float(luck_mult)
     eff_shake_str = totals["shake_str"] * float(str_mult)
 
-    # Speed & time
+    # Speed / time
     dig_factor = (1.0 + totals["dig_speed"] / 100.0) * float(shovel["dig_speed_mult"])
     shake_factor = 1.0 + totals["shake_speed"] / 100.0
     per_shake_seconds = BASE_SHAKE_SECONDS * float(pan["shake_speed_mult"])
@@ -220,17 +228,16 @@ def compute_once(
     collect_time = BASE_COLLECT_SECONDS / max(1e-6, dig_factor)
     total_time = float(overhead_s) + shake_time + collect_time
 
-    # Metrics
-    efficiency = (eff_luck * math.sqrt(max(0.0, totals["capacity"]))) / (
-        max(1e-6, total_time) * EFFICIENCY_DIVISOR
-    )
+    # Metrics with animation calibration applied to time
+    time_with_anim = max(1e-6, total_time) * float(anim_mult)
+    efficiency = (eff_luck * math.sqrt(max(0.0, totals["capacity"]))) / time_with_anim
     profit_rate = efficiency * (1.0 + totals["sell"] / 100.0)
 
     return totals, dict(
         eff_luck=eff_luck,
         eff_shake_str=eff_shake_str,
         shakes=shakes,
-        time_per_pan_s=total_time,
+        time_per_pan_s=total_time,  # raw cycle time (without anim multiplier)
         efficiency=efficiency,
         profit_rate=profit_rate,
     )
@@ -252,8 +259,8 @@ def mc_overhead_sim(
     login_bonus_luck,
     runs=400,
     seed=42,
+    anim_mult: float = 1.0,
 ):
-    """Monte Carlo over overhead to estimate mean/std of time/efficiency/profit."""
     base_totals, base_res = compute_once(
         pan,
         shovel,
@@ -265,6 +272,7 @@ def mc_overhead_sim(
         str_mult,
         overhead_mu,
         login_bonus_luck,
+        anim_mult=1.0,
     )
     per_shake_seconds = BASE_SHAKE_SECONDS * float(pan["shake_speed_mult"])
     dig_factor = (1.0 + base_totals["dig_speed"] / 100.0) * float(
@@ -287,10 +295,12 @@ def mc_overhead_sim(
         shake_time = (shakes * per_shake_seconds) / max(1e-6, shake_factor)
         collect_time = BASE_COLLECT_SECONDS / max(1e-6, dig_factor)
         total_time = overhead + shake_time + collect_time
-        eff = (eff_luck * math.sqrt(max(0.0, cap))) / (
-            max(1e-6, total_time) * EFFICIENCY_DIVISOR
-        )
+
+        # Animation multiplier applied to time for efficiency/profit
+        time_with_anim = max(1e-6, total_time) * float(anim_mult)
+        eff = (eff_luck * math.sqrt(max(0.0, cap))) / time_with_anim
         prof = eff * (1.0 + sell / 100.0)
+
         eff_vals.append(eff)
         prof_vals.append(prof)
         time_vals.append(total_time)
@@ -323,7 +333,6 @@ def empty_item(slot_name="(Empty)"):
 
 
 def score_from_res(res, objective):
-    """Pick objective score from result dict."""
     return res["efficiency"] if objective.startswith("Mythic") else res["profit_rate"]
 
 
@@ -334,12 +343,9 @@ st.caption("Build Planner and Build Generator")
 
 equip, equip6_map, enchants, potions, buffs, pans, shovels = load_csvs()
 
-# Information Tab
-tab_info, tab_build, tab_opt = st.tabs(
-    ["Information", "Build Planner", "Optimizer (BETA)"]
-)
-
 # Info
+tab_info, tab_build, tab_opt = st.tabs(["Information", "Build Planner", "Optimizer"])
+
 with tab_info:
     st.markdown("## What the stats mean")
     st.markdown(
@@ -355,11 +361,31 @@ with tab_info:
 - **Modifier** — Generic extra multiplier slot if your data uses it.
     """
     )
-
+    st.markdown("## Terminology")
     st.markdown(
         """
-**Overhead** is the per-pan constant (picking up, moving, etc.).  
-**Monte Carlo**: we sample Overhead from a normal distribution with clamp bounds to get mean ± std for Time/Efficiency/Profit.
+- **Efficiency** is the main metric used to compare builds. It is calculated as: (Luck * Capacity² / (Cycle Time * Animation Time (If animation time is enabled)))
+- **Profit** is the effective gain from a build taking into account Efficiency x Sellboost. It is calculated as: Efficiency * (1 + SellBoost / 100)
+- **Overhead** is the per-pan constant (picking up, moving, etc.) In the planner you can enable/disable player introduced overhead as if a bot was playing. For more realistic values, use the monte carlo simulation results.
+- **Monte Carlo**: Simulates an active use case scenario. Gives the averages for a more realistic distribution of efficiency.
+    """
+    )
+    st.markdown("## How to use the app")
+    st.markdown(
+        """
+1. Select your desired Pan and Shovel from the side menu.
+2. Choose your equipment for each slot (Neck, Charm, Rings) using the respective dropdowns.
+3. Adjust any relevant settings or toggles in the sidebar.
+4. Click the 'Run Optimizer' button to see the best build suggestions.
+    """
+    )
+    st.markdown("## Notes")
+    st.markdown(
+        """
+- The optimizer may not find the absolute best build due to the complexity of the search space.
+- Always double-check the suggested builds and adjust based on your playstyle and preferences.
+- If you encounter any issues or have suggestions, please reach out to the ItsPure on discord.
+- If you have 100% Equipment, 100% 6 Star equipment, etc that isnt in the database. Feel Free to reach out to ItsPure on discord and I will get it added.
     """
     )
 
@@ -369,7 +395,7 @@ with tab_build:
     def has6(name: str) -> bool:
         return bool(name and name != "(Empty)" and name in equip6_map)
 
-    # Sidebar - Pan & Shovel
+    # Sidebar - Pan / Shovel
     with st.sidebar:
         st.header("Pan & Shovel")
         pan_name = st.selectbox("Pan", pans["name"].tolist(), key="pan_select")
@@ -388,7 +414,7 @@ with tab_build:
             name=srow["name"],
             dig_str=float(srow["dig_str"]),
             dig_speed_mult=float(srow["dig_speed_mult"]),
-            toughness=float(srow.get("toughness", 0)),
+            toughness=float(srow["toughness"]),
         )
 
         st.caption(
@@ -444,7 +470,7 @@ with tab_build:
         ring_opts = ["(Empty)"] + rings_df["name"].tolist()
         colR1, colR2 = st.columns(2)
         ring_choices, ring_star6_flags = [], []
-        for i in range(1, 9):
+        for i in range(1, 8 + 1):
             col = colR1 if i <= 4 else colR2
             with col:
                 choice = st.selectbox(
@@ -488,8 +514,8 @@ with tab_build:
             min_value=0,
         )
 
-    # Totems & Overhead
-    st.subheader("Totems & Overhead")
+    # Totems / Animation
+    st.subheader("Run Toggles")
     t1, t2, t3, t4 = st.columns(4)
     with t1:
         meteor = st.checkbox("Meteor active (Luck ×2)", key="meteor_cb", value=False)
@@ -502,9 +528,10 @@ with tab_build:
             "Strength Totem (STR ×2)", key="str_totem_cb", value=False
         )
     with t4:
-        overhead_s = st.number_input(
-            "Overhead per pan (s)", key="overhead_seconds", value=3.0, step=0.1
+        apply_anim = st.checkbox(
+            "Apply animation time (+50%)", value=False, key="anim_cal_planner"
         )
+    anim_mult = (1.0 + ANIM_EXTRA) if apply_anim else 1.0
 
     luck_mult = (2.0 if meteor else 1.0) * (2.0 if luck_totem else 1.0)
     str_mult = 2.0 if str_totem else 1.0
@@ -542,14 +569,18 @@ with tab_build:
         if len(enchants[enchants["name"] == ench_name])
         else None
     )
-    pot_names = set(potions["name"].tolist())
-    buff_names = set(buffs["name"].tolist())
     potion_rows = [
-        potions[potions["name"] == n].iloc[0] for n in pot_sel if n in pot_names
+        potions[potions["name"] == n].iloc[0]
+        for n in pot_sel
+        if n in potions["name"].tolist()
     ]
-    buff_rows = [buffs[buffs["name"] == n].iloc[0] for n in buff_sel if n in buff_names]
+    buff_rows = [
+        buffs[buffs["name"] == n].iloc[0]
+        for n in buff_sel
+        if n in buffs["name"].tolist()
+    ]
 
-    # Compute n show results
+    # Compute / show results — Overhead in planner is ideal cycle only (0.0 human delay)
     totals, res = compute_once(
         pan,
         dict(shovel),
@@ -559,8 +590,9 @@ with tab_build:
         buff_rows,
         luck_mult,
         str_mult,
-        overhead_s,
+        0.0,
         login_bonus_luck,
+        anim_mult=anim_mult,
     )
 
     st.markdown(
@@ -589,13 +621,15 @@ with tab_build:
         st.write(f"**Shake STR (effective):** {res['eff_shake_str']:.2f}")
     with d2:
         st.write(f"**Shakes:** {res['shakes']}")
-        st.write(f"**Time / pan:** {res['time_per_pan_s']:.3f} s")
+        st.write(f"**Cycle time (ideal):** {res['time_per_pan_s']:.3f} s")
 
     st.subheader("Key metrics")
     k1, k2 = st.columns(2)
     with k1:
         st.markdown(f"### Efficiency: {int(res['efficiency']):,}")
-        st.caption("Efficiency = (Luck_eff × √Capacity) / (Time × 0.65)")
+        st.caption(
+            "Efficiency = (Luck_eff × √Capacity) / (Cycle Time × Animation Multiplier)"
+        )
     with k2:
         st.markdown(f"### Profit rate: {int(res['profit_rate']):,}")
         st.caption("Profit rate = Efficiency × (1 + Sell/100)")
@@ -603,22 +637,21 @@ with tab_build:
     # MC
     st.divider()
     st.markdown("#### Monte Carlo (optional)")
-
     mc_toggle = st.checkbox(
-        "Run Monte Carlo for overhead variance", key="mc_toggle_planner"
+        "Run Monte Carlo for realistic delay", key="mc_planner_toggle"
     )
     if mc_toggle:
         c1, c2, c3 = st.columns(3)
         with c1:
             mu = st.number_input(
-                "Overhead mean (s)",
-                value=float(overhead_s),
-                step=0.1,
-                key="mc_mu_planner",
+                "Average extra delay (s)", value=0.8, step=0.1, key="mc_mu_planner"
             )
         with c2:
             sigma = st.number_input(
-                "Overhead std dev (s)", value=0.3, step=0.05, key="mc_sigma_planner"
+                "Delay variability, std dev (s)",
+                value=0.3,
+                step=0.05,
+                key="mc_sigma_planner",
             )
         with c3:
             runs = st.number_input(
@@ -627,17 +660,11 @@ with tab_build:
         c4, c5 = st.columns(2)
         with c4:
             omin = st.number_input(
-                "Overhead min (s)",
-                value=max(0.0, float(overhead_s) - 1.0),
-                step=0.1,
-                key="mc_min_planner",
+                "Min delay clamp (s)", value=0.0, step=0.1, key="mc_min_planner"
             )
         with c5:
             omax = st.number_input(
-                "Overhead max (s)",
-                value=float(overhead_s) + 1.0,
-                step=0.1,
-                key="mc_max_planner",
+                "Max delay clamp (s)", value=2.0, step=0.1, key="mc_max_planner"
             )
 
         summary = mc_overhead_sim(
@@ -649,21 +676,22 @@ with tab_build:
             buff_rows,
             luck_mult,
             str_mult,
-            mu,
-            sigma,
-            omin,
-            omax,
+            float(mu),
+            float(sigma),
+            float(omin),
+            float(omax),
             login_bonus_luck,
             runs=int(runs),
+            anim_mult=anim_mult,
         )
         st.write(
-            f"**Time / pan:** {summary['time_mean']:.3f} ± {summary['time_std']:.3f} s"
+            f"**Typical Cycle:** {summary['time_mean']:.3f} s  (spread ±{summary['time_std']:.3f})"
         )
         st.write(
-            f"**Efficiency:** {summary['eff_mean']:.0f} ± {summary['eff_std']:.0f}"
+            f"**Typical Efficiency:** {summary['eff_mean']:.0f}  (spread ±{summary['eff_std']:.0f})"
         )
         st.write(
-            f"**Profit rate:** {summary['prof_mean']:.0f} ± {summary['prof_std']:.0f}"
+            f"**Typical Profit:** {summary['prof_mean']:.0f}  (spread ±{summary['prof_std']:.0f})"
         )
 
     # Selected
@@ -708,7 +736,7 @@ with tab_build:
         "meteor": bool(meteor),
         "luck_totem": bool(luck_totem),
         "str_totem": bool(str_totem),
-        "overhead_s": float(overhead_s),
+        "apply_anim": bool(apply_anim),
     }
 
     colP1, colP2 = st.columns(2)
@@ -738,11 +766,9 @@ with tab_build:
             try:
                 payload = json.loads(pasted) if pasted and pasted.strip() else None
                 if payload:
-                    st.session_state["pan_select"] = payload.get(
-                        "pan_name", st.session_state.get("pan_select")
-                    )
+                    st.session_state["pan_select"] = payload.get("pan_name", pan_name)
                     st.session_state["shovel_select"] = payload.get(
-                        "shovel_name", st.session_state.get("shovel_select")
+                        "shovel_name", shv_name
                     )
                     st.session_state["neck_select"] = (
                         payload.get("neck", {}) or {}
@@ -785,8 +811,8 @@ with tab_build:
                     st.session_state["str_totem_cb"] = bool(
                         payload.get("str_totem", False)
                     )
-                    st.session_state["overhead_seconds"] = float(
-                        payload.get("overhead_s", 3.0)
+                    st.session_state["anim_cal_planner"] = bool(
+                        payload.get("apply_anim", False)
                     )
                     st.success("Build imported. Rerunning to apply controls.")
                     st.rerun()
@@ -797,7 +823,7 @@ with tab_build:
 
 # Optimizer
 with tab_opt:
-    st.subheader("Optimize / Generate Build (BETA)")
+    st.subheader("Optimize / Generate Build")
 
     # Pools
     neck_df_all = equip[
@@ -814,37 +840,45 @@ with tab_opt:
     all_shovels = shovels["name"].tolist()
     all_enchants = enchants["name"].tolist()
 
-    # Budgets / search settings
+    # Budgets / search
     b1, b2, b3 = st.columns(3)
     with b1:
-        # Limit number of Enchants considered
-        max_enchants = st.number_input(
-            "Max Enchants to explore",
-            value=min(100, len(all_enchants)),
+        max_combos = st.number_input(
+            "Max (Pan×Shovel×Enchant) to explore",
+            value=100,
             min_value=1,
-            step=10,
+            step=50,
+            key="opt_max_combos",
         )
     with b2:
         neck_charm_shortlist = st.number_input(
-            "Neck/Charm shortlist per combo", value=6, min_value=1, step=1
+            "Neck/Charm shortlist per combo",
+            value=6,
+            min_value=1,
+            step=1,
+            key="opt_nc_short",
         )
     with b3:
         ring_shortlist = st.number_input(
-            "Ring shortlist size", value=30, min_value=5, step=5
+            "Ring shortlist size", value=30, min_value=5, step=5, key="opt_ring_short"
         )
 
     b4, b5, b6 = st.columns(3)
     with b4:
         search_runs = st.number_input(
-            "Greedy builds per shortlist", value=12, min_value=1, step=1
+            "Greedy builds per shortlist",
+            value=12,
+            min_value=1,
+            step=1,
+            key="opt_search_runs",
         )
     with b5:
         jitter_pct = st.number_input(
-            "Greedy jitter (±%)", value=1.0, min_value=0.0, step=0.5
+            "Greedy jitter (±%)", value=1.0, min_value=0.0, step=0.5, key="opt_jitter"
         )
     with b6:
         rand_seed = st.number_input(
-            "Random seed", value=42, min_value=0, step=1, key="rand_seed_opt"
+            "Random seed", value=42, min_value=0, step=1, key="opt_seed"
         )
 
     # Objective / constraints
@@ -853,14 +887,17 @@ with tab_opt:
         objective = st.selectbox(
             "Objective",
             ["Mythic/Exotics rate (Efficiency)", "Making Money (Profit rate)"],
+            key="opt_objective",
         )
     with ctop2:
-        allow_dupes = st.checkbox("Allow duplicate rings", value=True)
+        allow_dupes = st.checkbox("Allow duplicate rings", value=True, key="opt_dupes")
     with ctop3:
-        include_empty = st.checkbox("Allow empty ring slots", value=False)
+        include_empty = st.checkbox(
+            "Allow empty ring slots", value=False, key="opt_empty"
+        )
 
     st.markdown("### Whitelists & Limits")
-    # Pans/Shovels
+    # Pans/Shovels — single choice
     ps1, ps2 = st.columns(2)
     with ps1:
         pan_choice = st.selectbox(
@@ -885,7 +922,7 @@ with tab_opt:
             key="wl_shovel_choice",
         )
 
-    # Enchants
+    # Enchants — unlimited multiselect
     ench_wl = st.multiselect(
         "Enchants (no limit)",
         options=all_enchants,
@@ -893,7 +930,7 @@ with tab_opt:
         key="wl_enchants_fast",
     )
 
-    # Helper to enforce max=4
+    # Helper to enforce max selections for the gear categories
     def enforce_max4(lst, label):
         if len(lst) > 4:
             st.info(f"{label}: using first 4 of {len(lst)} selections.")
@@ -927,7 +964,7 @@ with tab_opt:
         )
         ring_wl = enforce_max4(ring_wl, "Rings")
 
-    # Toggles / MC verification settings
+    # Toggles / Animation / MC verification
     t1, t2, t3, t4 = st.columns(4)
     with t1:
         meteor = st.checkbox(
@@ -948,12 +985,15 @@ with tab_opt:
             key="str_fast",
         )
     with t4:
-        overhead_s = st.number_input(
-            "Overhead per pan (s)",
-            value=float(st.session_state.get("overhead_seconds", 3.0)),
-            step=0.1,
-            key="overhead_fast",
+        apply_anim_opt = st.checkbox(
+            "Apply animation time in scoring (+50%)",
+            value=bool(st.session_state.get("anim_cal_planner", False)),
+            key="anim_cal_opt",
         )
+    anim_mult_opt = (1.0 + ANIM_EXTRA) if apply_anim_opt else 1.0
+
+    # 6 star usage in optimizer
+    allow_six = st.checkbox("Enable 6★ where available", value=True, key="opt_allow6")
 
     luck_mult = (2.0 if meteor else 1.0) * (2.0 if luck_totem else 1.0)
     str_mult = 2.0 if str_totem else 1.0
@@ -962,32 +1002,43 @@ with tab_opt:
         value=int(st.session_state.get("login_bonus_luck", 0)),
         step=1,
         min_value=0,
+        key="opt_login_b",
     )
 
     mc1, mc2, mc3 = st.columns(3)
     with mc1:
         mc_runs = st.number_input(
-            "MC runs per candidate", value=300, min_value=50, step=50, key="mc_runs_opt"
+            "MC runs per candidate", value=300, min_value=50, step=50, key="opt_mc_runs"
         )
     with mc2:
         mc_sigma = st.number_input(
-            "Overhead std dev (s)", value=0.3, step=0.05, key="mc_sigma_opt"
+            "Overhead std dev (s)", value=0.3, step=0.05, key="opt_mc_sigma"
         )
     with mc3:
         mc_range = st.slider(
-            "Overhead clamp range (±s)", 0.0, 2.0, 1.0, 0.1, key="mc_range_opt"
+            "Overhead clamp range (±s)", 0.0, 2.0, 1.0, 0.1, key="opt_mc_range"
         )
 
+    # Average overhead (mean) for optimizer scoring & MC, clamps symmetrical around it
+    overhead_s = st.number_input(
+        "Average overhead (s) used in MC", value=0.8, step=0.1, key="opt_overhead_mu"
+    )
     overhead_min = max(0.0, overhead_s - mc_range)
     overhead_max = overhead_s + mc_range
 
     # Helper shortlist functions
-    def shortlist_neck_charm(pan, shovel, ench_row, neck_df, charm_df, k):
-        pairs_scores = []
+    def shortlist_neck_charm(pan, shovel, ench_row, neck_df, charm_df, k, anim_mult):
+        scores = []
         for _, n in neck_df.iterrows():
-            n_item = row_to_item(n, False, {})
+            n_item = row_to_item(
+                n, allow_six and (n["name"] in equip6_map), equip6_map.get(n["name"])
+            )
             for _, c in charm_df.iterrows():
-                c_item = row_to_item(c, False, {})
+                c_item = row_to_item(
+                    c,
+                    allow_six and (c["name"] in equip6_map),
+                    equip6_map.get(c["name"]),
+                )
                 items = [n_item, c_item]
                 _, res = compute_once(
                     pan,
@@ -998,22 +1049,33 @@ with tab_opt:
                     [],
                     luck_mult,
                     str_mult,
-                    overhead_s,
+                    0.0,
                     login_bonus_luck,
+                    anim_mult=anim_mult,
                 )
-                pairs_scores.append(((n_item, c_item), score_from_res(res, objective)))
-        pairs_scores.sort(key=lambda x: x[1], reverse=True)
-        return [pair for pair, _ in pairs_scores[: int(k)]]
+                scores.append(((n_item, c_item), score_from_res(res, objective)))
+        scores.sort(key=lambda x: x[1], reverse=True)
+        return [pair for pair, _ in scores[: int(k)]]
 
     def shortlist_rings(
-        pan, shovel, ench_row, base_items, ring_df, size, allow_dupes, include_empty
+        pan,
+        shovel,
+        ench_row,
+        base_items,
+        ring_df,
+        size,
+        allow_dupes,
+        include_empty,
+        anim_mult,
     ):
         candidates = []
         if include_empty:
             candidates.append(empty_item("(Empty)"))
         lone_scores = []
         for _, r in ring_df.iterrows():
-            ring = row_to_item(r, False, {})
+            ring = row_to_item(
+                r, allow_six and (r["name"] in equip6_map), equip6_map.get(r["name"])
+            )
             test = base_items + [ring]
             _, res = compute_once(
                 pan,
@@ -1024,8 +1086,9 @@ with tab_opt:
                 [],
                 luck_mult,
                 str_mult,
-                overhead_s,
+                0.0,
                 login_bonus_luck,
+                anim_mult=anim_mult,
             )
             lone_scores.append((ring, score_from_res(res, objective)))
         lone_scores.sort(key=lambda x: x[1], reverse=True)
@@ -1043,12 +1106,13 @@ with tab_opt:
         jitter_pct,
         allow_dupes,
         seed,
+        anim_mult,
     ):
         rng = np.random.default_rng(seed)
         best_build, best_score = None, -1e99
         for _ in range(int(runs)):
             chosen, used = [], set()
-            for _slot in range(8):
+            for slot in range(8):
                 local_best, local_best_score = None, -1e99
                 for cand in ring_candidates:
                     if (
@@ -1071,8 +1135,9 @@ with tab_opt:
                         [],
                         luck_mult,
                         str_mult,
-                        overhead_s,
+                        0.0,
                         login_bonus_luck,
+                        anim_mult=anim_mult,
                     )
                     s = score_from_res(res, objective) * (
                         1.0 + rng.normal(0, float(jitter_pct) / 100.0)
@@ -1091,8 +1156,9 @@ with tab_opt:
                 [],
                 luck_mult,
                 str_mult,
-                overhead_s,
+                0.0,
                 login_bonus_luck,
+                anim_mult=anim_mult,
             )
             final_score = score_from_res(final_res, objective)
             if final_score > best_score:
@@ -1101,10 +1167,10 @@ with tab_opt:
                 )
         return best_build
 
-    # Run Optimizer
-    if st.button("Run Optimizer"):
+    # Button to run optimizer
+    if st.button("Run Optimizer", key="opt_run_btn"):
         with st.spinner("Searching…"):
-            # Filter whitelists & limit enchants
+            # Filter by chosen pan/shovel and limited whitelists
             neck_df = neck_df_all[neck_df_all["name"].isin(neck_wl)].copy()
             charm_df = charm_df_all[charm_df_all["name"].isin(charm_wl)].copy()
             ring_df = ring_df_all[ring_df_all["name"].isin(ring_wl)].copy()
@@ -1113,10 +1179,10 @@ with tab_opt:
             if ench_df.empty:
                 st.error("Please select at least one Enchant.")
                 st.stop()
-            ench_list = ench_df["name"].tolist()[: int(max_enchants)]
 
-            # uild combos across chosen pan/shovel and limited enchants
-            combos = [(pan_choice, shv_choice, e) for e in ench_list]
+            # Build combos across chosen pan/shovel and selected enchants only
+            combos = [(pan_choice, shv_choice, e) for e in ench_df["name"].tolist()]
+            combos = combos[: int(max_combos)]
 
             progress = st.progress(0, text="Initializing…")
             builds = []
@@ -1152,6 +1218,7 @@ with tab_opt:
                     neck_df,
                     charm_df,
                     k=int(neck_charm_shortlist),
+                    anim_mult=anim_mult_opt,
                 )
 
                 for n_item, c_item in nc_pairs:
@@ -1165,6 +1232,7 @@ with tab_opt:
                         size=int(ring_shortlist),
                         allow_dupes=allow_dupes,
                         include_empty=include_empty,
+                        anim_mult=anim_mult_opt,
                     )
                     best = greedy_fill(
                         pan,
@@ -1176,6 +1244,7 @@ with tab_opt:
                         jitter_pct=jitter_pct,
                         allow_dupes=allow_dupes,
                         seed=int(rand_seed),
+                        anim_mult=anim_mult_opt,
                     )
                     if best:
                         item_names = [i["name"] for i in best["items"]]
@@ -1229,31 +1298,46 @@ with tab_opt:
                 st.markdown("#### Monte Carlo verification")
                 top_k = min(8, len(builds))
                 ver_rows = []
-                # Cache lookups to avoid repeated DF indexing
-                pan_map = pans.set_index("name").to_dict(orient="index")
-                shv_map = shovels.set_index("name").to_dict(orient="index")
-                ench_map = enchants.set_index("name").to_dict(orient="index")
                 for i in range(top_k):
                     b = builds[i]
-                    p = pan_map[b["pan_name"]]
-                    s = shv_map[b["shovel_name"]]
-                    e = ench_map[b["ench_name"]]
                     mc = mc_overhead_sim(
                         dict(
                             name=b["pan_name"],
-                            luck=float(p["luck"]),
-                            capacity=float(p["capacity"]),
-                            shake_str=float(p["shake_str"]),
-                            shake_speed_mult=float(p["shake_speed_mult"]),
+                            luck=float(
+                                pans[pans["name"] == b["pan_name"]].iloc[0]["luck"]
+                            ),
+                            capacity=float(
+                                pans[pans["name"] == b["pan_name"]].iloc[0]["capacity"]
+                            ),
+                            shake_str=float(
+                                pans[pans["name"] == b["pan_name"]].iloc[0]["shake_str"]
+                            ),
+                            shake_speed_mult=float(
+                                pans[pans["name"] == b["pan_name"]].iloc[0][
+                                    "shake_speed_mult"
+                                ]
+                            ),
                         ),
                         dict(
                             name=b["shovel_name"],
-                            dig_str=float(s["dig_str"]),
-                            dig_speed_mult=float(s["dig_speed_mult"]),
-                            toughness=float(s.get("toughness", 0)),
+                            dig_str=float(
+                                shovels[shovels["name"] == b["shovel_name"]].iloc[0][
+                                    "dig_str"
+                                ]
+                            ),
+                            dig_speed_mult=float(
+                                shovels[shovels["name"] == b["shovel_name"]].iloc[0][
+                                    "dig_speed_mult"
+                                ]
+                            ),
+                            toughness=float(
+                                shovels[shovels["name"] == b["shovel_name"]].iloc[0][
+                                    "toughness"
+                                ]
+                            ),
                         ),
                         b["items"],
-                        e,
+                        enchants[enchants["name"] == b["ench_name"]].iloc[0],
                         [],
                         [],
                         luck_mult,
@@ -1265,6 +1349,7 @@ with tab_opt:
                         int(login_bonus_luck),
                         runs=int(mc_runs),
                         seed=int(rand_seed) + i,
+                        anim_mult=anim_mult_opt,
                     )
                     b["mc_eff_mean"] = mc["eff_mean"]
                     b["mc_eff_std"] = mc["eff_std"]
@@ -1279,12 +1364,12 @@ with tab_opt:
                             Enchant=b["ench_name"],
                             Neck=b["neck"],
                             Charm=b["charm"],
-                            Eff_mean=int(mc["eff_mean"]),
-                            Eff_std=f"{mc['eff_std']:.1f}",
-                            Profit_mean=int(mc["prof_mean"]),
-                            Profit_std=f"{mc['prof_std']:.1f}",
-                            Time_mean=f"{mc['time_mean']:.3f}s",
-                            Time_std=f"{mc['time_std']:.3f}s",
+                            Typical_Efficiency=int(mc["eff_mean"]),
+                            Efficiency_spread=f"±{mc['eff_std']:.1f}",
+                            Typical_Profit=int(mc["prof_mean"]),
+                            Profit_spread=f"±{mc['prof_std']:.1f}",
+                            Typical_Cycle=f"{mc['time_mean']:.3f}s",
+                            Cycle_spread=f"±{mc['time_std']:.3f}s",
                         )
                     )
                 st.dataframe(pd.DataFrame(ver_rows), use_container_width=True)
@@ -1299,7 +1384,7 @@ with tab_opt:
                 neck_name = best["neck"]
                 charm_name = best["charm"]
                 rings_struct = [
-                    {"name": nm, "star6": False}
+                    {"name": nm, "star6": (allow_six and (nm in equip6_map))}
                     for nm in best["item_names"]
                     if nm not in (neck_name, charm_name)
                 ]
@@ -1309,8 +1394,14 @@ with tab_opt:
                 best_build = {
                     "pan_name": best["pan_name"],
                     "shovel_name": best["shovel_name"],
-                    "neck": {"name": neck_name, "star6": False},
-                    "charm": {"name": charm_name, "star6": False},
+                    "neck": {
+                        "name": neck_name,
+                        "star6": (allow_six and (neck_name in equip6_map)),
+                    },
+                    "charm": {
+                        "name": charm_name,
+                        "star6": (allow_six and (charm_name in equip6_map)),
+                    },
                     "rings": rings_struct,
                     "enchant": best["ench_name"],
                     "potions": [],
@@ -1319,7 +1410,7 @@ with tab_opt:
                     "meteor": bool(meteor),
                     "luck_totem": bool(luck_totem),
                     "str_totem": bool(str_totem),
-                    "overhead_s": float(overhead_s),
+                    "apply_anim": bool(apply_anim_opt),
                 }
 
                 st.success(
@@ -1328,14 +1419,12 @@ with tab_opt:
 
                 c1, c2 = st.columns(2)
                 with c1:
-                    if st.button("Apply best build to Planner (Broken ATM)"):
-                        # Use session_state handoff to Planner tab
+                    if st.button(
+                        "Apply best build to Planner (Broken ATM)",
+                        key="apply_best_to_planner",
+                    ):
                         st.session_state["pending_import_payload"] = best_build
-                        (
-                            st.switch_page("streamlit_app.py")
-                            if hasattr(st, "switch_page")
-                            else st.experimental_rerun()
-                        )
+                        st.rerun()
                 with c2:
                     st.download_button(
                         "Download best build JSON",

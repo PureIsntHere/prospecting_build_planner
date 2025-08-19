@@ -1,33 +1,33 @@
 name,slot,luck,dig_str,capacity,dig_speed,shake_str,shake_speed,sell,size,modifier
-Golden Ring,Ring,0.7,0,0,0,0.0,0,0,0,0
 Amethyst Pendant,Necklace,2.0,0,0,0,0.0,0,15,0,0
-Garden Glove,Charm,0.0,1,5,0,0.0,0,0,0,0
-Titanium Ring,Ring,0.0,0,13,0,0.0,0,0,0,0
-Smoke Ring,Ring,0.0,0,0,0,0.0,0,0,0,15
-Pearl Necklace,Necklace,4.0,4,0,0,0.0,0,0,0,0
-Jade Armband,Charm,8.0,0,10,0,0.0,0,0,0,0
-Topaz Necklace,Necklace,5.0,4,0,0,1.0,0,0,0,0
-Ruby Ring,Ring,3.0,0,0,0,0.0,0,0,18,0
-Lapis Armband,Charm,9.0,0,0,40,0.0,40,0,0,0
-Speed Coil,Charm,0.0,0,0,70,0.0,70,0,0,0
-Meteor Ring,Ring,0.0,3,0,0,1.0,0,0,0,0
-Opal Amulet,Necklace,13.0,0,0,0,0.0,0,0,0,90
-Moon Ring,Ring,7.0,0,0,40,0.0,40,0,0,0
-Gravity Coil,Charm,0.0,0,140,0,0.0,0,0,0,0
-Heart Of The Ocean,Ring,10.0,0,0,0,0.0,20,20,0,0
-Guiding Light,Charm,20.0,0,40,0,0.0,0,0,0,45
-Lightkeeper's Ring,Ring,0.0,0,0,25,0.0,0,25,0,25
-Mass Accumulator,Necklace,0.0,0,60,0,0.0,0,0,80,0
-Crown,Charm,30.0,0,0,0,0.0,0,90,45,0
-Dragon Claw,Charm,0.0,30,0,0,8.0,0,0,0,0
-Royal Federation Crown,Charm,90.0,0,0,0,0.0,0,180,90,0
-Phoenix Heart,Necklace,300.0,0,0,0,0.0,0,0,-40,0
-Celestial Rings,Necklace,100.0,0,275,0,0.0,0,0,50,150
 Apocalypse Bringer,Ring,45.0,22,0,0,5.5,0,55,0,0
-Mythril Ring,Ring,90.0,0,0,42,0.0,42,26,0,0
-Phoenix Wings,Charm,300.0,0,-40,0,0.0,0,0,0,0
-Prismatic Star,Ring,22.0,11,45,22,3.2,22,22,22,22
+Celestial Rings,Necklace,100.0,0,275,0,0.0,0,0,50,150
+Crown,Charm,30.0,0,0,0,0.0,0,90,45,0
 Cryogenic Preserver,Charm,275.0,0,0,0,45.0,-18,55,0,0
-Solar Ring,Ring,110.0,9,0,-8,2.2,-8,0,0,22
+Dragon Claw,Charm,0.0,30,0,0,8.0,0,0,0,0
 Fossilized Crown,Charm,260.0,0,225,0,0.0,32,110,55,0
 FrostThorn Pendant,Necklace,450.0,215,225,-28,0.0,0,0,110,0
+Garden Glove,Charm,0.0,1,5,0,0.0,0,0,0,0
+Golden Ring,Ring,0.7,0,0,0,0.0,0,0,0,0
+Gravity Coil,Charm,0.0,0,140,0,0.0,0,0,0,0
+Guiding Light,Charm,20.0,0,40,0,0.0,0,0,0,45
+Heart Of The Ocean,Ring,10.0,0,0,0,0.0,20,20,0,0
+Jade Armband,Charm,8.0,0,10,0,0.0,0,0,0,0
+Lapis Armband,Charm,9.0,0,0,40,0.0,40,0,0,0
+Lightkeeper's Ring,Ring,0.0,0,0,25,0.0,0,25,0,25
+Mass Accumulator,Necklace,0.0,0,60,0,0.0,0,0,80,0
+Meteor Ring,Ring,0.0,3,0,0,1.0,0,0,0,0
+Moon Ring,Ring,7.0,0,0,40,0.0,40,0,0,0
+Mythril Ring,Ring,90.0,0,0,42,0.0,42,26,0,0
+Opal Amulet,Necklace,13.0,0,0,0,0.0,0,0,0,90
+Pearl Necklace,Necklace,4.0,4,0,0,0.0,0,0,0,0
+Phoenix Heart,Necklace,300.0,0,0,0,0.0,0,0,-40,0
+Phoenix Wings,Charm,300.0,0,-40,0,0.0,0,0,0,0
+Prismatic Star,Ring,22.0,11,45,22,3.2,22,22,22,22
+Royal Federation Crown,Charm,90.0,0,0,0,0.0,0,180,90,0
+Ruby Ring,Ring,3.0,0,0,0,0.0,0,0,18,0
+Smoke Ring,Ring,0.0,0,0,0,0.0,0,0,0,15
+Solar Ring,Ring,110.0,9,0,-8,2.2,-8,0,0,22
+Speed Coil,Charm,0.0,0,0,70,0.0,70,0,0,0
+Titanium Ring,Ring,0.0,0,13,0,0.0,0,0,0,0
+Topaz Necklace,Necklace,5.0,4,0,0,1.0,0,0,0,0
