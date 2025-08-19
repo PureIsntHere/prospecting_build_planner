@@ -4,9 +4,24 @@ import pandas as pd
 import streamlit as st
 
 APP_TITLE = "Pures Optimizer"
-BASE_SHAKE_SECONDS = 0.25
-BASE_COLLECT_SECONDS = 2.0
-ANIM_EXTRA = 0.50  # +50% time when animation calibration is on
+
+ANIM_EXTRA = 0.20  # +20% time when animation calibration is on
+
+# Timing model
+K_DIG_FILL = 1.5
+
+# Digging
+ALPHA_DIG = 0.50
+T_DIG_SECONDS = 1.40
+
+# Shaking
+T_SHAKE_SECONDS = 0.54
+FIRST_SHAKE_EXTRA = 0.07
+
+# Lockouts (fixed per pan)
+POST_DIG_LOCK_S = 0.16
+POST_SHAKE_LOCK_S = 1.95
+BASE_OVERHEAD_S = POST_DIG_LOCK_S + POST_SHAKE_LOCK_S
 
 
 # Load Data CSVs
@@ -24,15 +39,20 @@ def load_csvs():
         except Exception:
             equip6_full = None
 
-    equip6_map = {}
+    # --- Normalize column names early ---
+    equip.columns = [c.strip() for c in equip.columns]
     if equip6_full is not None:
         equip6_full.columns = [c.strip() for c in equip6_full.columns]
-        equip.columns = (
-            [c.strip() for c in equip.columns]
-            if hasattr(equip, "columns")
-            else equip.columns
-        )
-        equip.columns = [c.strip() for c in equip.columns]
+
+    # --- Trim names so index lookups are stable ---
+    if "name" in equip.columns:
+        equip["name"] = equip["name"].astype(str).str.strip()
+    if equip6_full is not None and "name" in equip6_full.columns:
+        equip6_full["name"] = equip6_full["name"].astype(str).str.strip()
+
+    # Build 6★ override map (store replacement values for differing numeric cols)
+    equip6_map = {}
+    if equip6_full is not None:
         numeric_cols = [
             "luck",
             "dig_str",
@@ -46,71 +66,123 @@ def load_csvs():
         ]
         base_by_name = equip.set_index("name")
         for _, r in equip6_full.iterrows():
-            name = str(r["name"])
-            if name not in base_by_name.index:
+            name = str(r.get("name", "")).strip()
+            if not name or name not in base_by_name.index:
                 continue
-            diffs = {}
             b = base_by_name.loc[name]
+            diffs = {}
             for col in numeric_cols:
                 try:
-                    v6 = float(r[col])
-                    vb = float(b[col])
+                    v6 = float(r.get(col, np.nan))
+                    vb = float(b.get(col, np.nan))
                 except Exception:
                     continue
                 if pd.isna(v6) or pd.isna(vb):
                     continue
                 if abs(v6 - vb) > 1e-9:
-                    diffs[col] = v6
+                    diffs[col] = v6  # store absolute replacement, not delta
             if diffs:
                 equip6_map[name] = diffs
 
+    # Other CSVs  (the typo was here — must be read_csv)
     ench = pd.read_csv("enchants.csv")
     pots = pd.read_csv("potions.csv")
     buffs = pd.read_csv("buffs.csv")
-
     pans = pd.read_csv("pans.csv")
     shovels = pd.read_csv("shovels.csv")
 
+    # Trim 'name' everywhere to avoid whitespace mismatches
+    for _df in (ench, pots, buffs, pans, shovels):
+        if _df is not None and "name" in _df.columns:
+            _df["name"] = _df["name"].astype(str).str.strip()
+
+    # Ensure required columns exist (use NaN so we can choose defaults later)
     for df, cols in [
-        (pans,    ["name","luck","capacity","shake_str","shake_speed_mult","sell","size","modifier","passives"]),
-        (shovels, ["name","dig_str","dig_speed_mult","toughness","sell","size","modifier"]),
+        (
+            pans,
+            [
+                "name",
+                "luck",
+                "capacity",
+                "shake_str",
+                "shake_speed_mult",
+                "sell",
+                "size",
+                "modifier",
+                "passives",
+            ],
+        ),
+        (
+            shovels,
+            [
+                "name",
+                "dig_str",
+                "dig_speed_mult",
+                "toughness",
+                "sell",
+                "size",
+                "modifier",
+            ],
+        ),
     ]:
         for c in cols:
             if c not in df.columns:
-                df[c] = "" if c in ("name","passives") else 0.0
+                df[c] = "" if c in ("name", "passives") else np.nan
 
-    for df, cols in [
-        (pans,    ["luck","capacity","shake_str","shake_speed_mult","sell","size","modifier"]),
-        (shovels, ["dig_str","dig_speed_mult","toughness","sell","size","modifier"]),
-    ]:
-        for c in cols:
-            df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0.0)
+    # Numeric coercion with correct defaults:
+    # - multipliers -> default 1.0
+    # - others      -> default 0.0
+    def _num(s, default):
+        return pd.to_numeric(s, errors="coerce").fillna(default)
 
+    pans["luck"] = _num(pans["luck"], 0.0)
+    pans["capacity"] = _num(pans["capacity"], 0.0)
+    pans["shake_str"] = _num(pans["shake_str"], 0.0)
+    pans["shake_speed_mult"] = _num(pans["shake_speed_mult"], 1.0)
+    pans["sell"] = _num(pans["sell"], 0.0)
+    pans["size"] = _num(pans["size"], 0.0)
+    pans["modifier"] = _num(pans["modifier"], 0.0)
+
+    shovels["dig_str"] = _num(shovels["dig_str"], 0.0)
+    shovels["dig_speed_mult"] = _num(shovels["dig_speed_mult"], 1.0)
+    shovels["toughness"] = _num(shovels["toughness"], 0.0)
+    shovels["sell"] = _num(shovels["sell"], 0.0)
+    shovels["size"] = _num(shovels["size"], 0.0)
+    shovels["modifier"] = _num(shovels["modifier"], 0.0)
+
+    # --- Parse pan passive text into sell/size/modifier IF those fields are blank/zero ---
     import re
+
     def _parse_passives(text: str):
         sell = size = modifier = 0.0
         if isinstance(text, str) and text.strip():
             t = text.lower().replace("boost", "").replace("%", "")
-            for kind, val in re.findall(r"(size|modifier|sell)\s*([+\-]?\d+(?:\.\d+)?)", t):
+            for kind, val in re.findall(
+                r"(size|modifier|sell)\s*([+\-]?\d+(?:\.\d+)?)", t
+            ):
                 v = float(val)
-                if kind == "size":      size += v
-                elif kind == "modifier": modifier += v
-                elif kind == "sell":     sell += v
+                if kind == "size":
+                    size += v
+                elif kind == "modifier":
+                    modifier += v
+                elif kind == "sell":
+                    sell += v
         return sell, size, modifier
 
     if "passives" in pans.columns:
         for i, txt in pans["passives"].items():
             se, si, mo = _parse_passives(txt)
-
-            if (not np.isfinite(pans.loc[i, "sell"])) or pans.loc[i, "sell"] == 0.0:
+            if not np.isfinite(pans.loc[i, "sell"]) or pans.loc[i, "sell"] == 0.0:
                 pans.loc[i, "sell"] = se
-            if (not np.isfinite(pans.loc[i, "size"])) or pans.loc[i, "size"] == 0.0:
+            if not np.isfinite(pans.loc[i, "size"]) or pans.loc[i, "size"] == 0.0:
                 pans.loc[i, "size"] = si
-            if (not np.isfinite(pans.loc[i, "modifier"])) or pans.loc[i, "modifier"] == 0.0:
+            if (
+                not np.isfinite(pans.loc[i, "modifier"])
+                or pans.loc[i, "modifier"] == 0.0
+            ):
                 pans.loc[i, "modifier"] = mo
 
     return equip, equip6_map, ench, pots, buffs, pans, shovels
-
 
 
 def row_to_item(row, star6, overrides=None):
@@ -156,8 +228,7 @@ def compute_once(
         modifier=float(pan.get("modifier", 0.0)) + float(shovel.get("modifier", 0.0)),
     )
 
-
-    # Equipment (6 star  overrides if toggled on that item)
+    # Equipment (apply 6★ overrides if present on that item)
     for it in items:
         use_over = (
             bool(it.get("star6"))
@@ -227,15 +298,35 @@ def compute_once(
     eff_luck = totals["luck"] * float(luck_mult)
     eff_shake_str = totals["shake_str"] * float(str_mult)
 
-    # Speed / time
+    # Speed multipliers
     dig_factor = (1.0 + totals["dig_speed"] / 100.0) * float(shovel["dig_speed_mult"])
     shake_factor = 1.0 + totals["shake_speed"] / 100.0
-    per_shake_seconds = BASE_SHAKE_SECONDS * float(pan["shake_speed_mult"])
 
+    # Digs: number of shovel actions needed to fill the pan
+    # digs ≈ ceil( Capacity / ( K * DigStrength ) )
+    digs = int(
+        np.ceil(
+            max(1e-6, totals["capacity"]) / max(1e-6, K_DIG_FILL * totals["dig_str"])
+        )
+    )
+    # Calibrated dig animation law: t_per_dig = T_DIG_SECONDS / (dig_factor ** ALPHA_DIG)
+    dig_time = (digs * float(T_DIG_SECONDS)) / (
+        max(1e-6, dig_factor) ** float(ALPHA_DIG)
+    )
+
+    # Shakes: number needed to process the dirt
+    # shakes ≈ ceil( Capacity / ShakeStrength )
     shakes = int(np.ceil(max(1e-6, totals["capacity"]) / max(1e-6, eff_shake_str)))
-    shake_time = (shakes * per_shake_seconds) / max(1e-6, shake_factor)
-    collect_time = BASE_COLLECT_SECONDS / max(1e-6, dig_factor)
-    total_time = float(overhead_s) + shake_time + collect_time
+    per_shake_seconds = float(T_SHAKE_SECONDS) * float(pan["shake_speed_mult"])
+    shake_time_core = (shakes * per_shake_seconds) / max(1e-6, shake_factor)
+
+    # Add a small startup penalty for the *first* shake (constant; not scaled by speed)
+    first_shake_extra = float(globals().get("FIRST_SHAKE_EXTRA", 0.0))
+    shake_time = shake_time_core + (first_shake_extra if shakes > 0 else 0.0)
+
+    # Total time per pan
+    # Fixed lockouts (post-dig + post-shake) + any user/MC overhead passed in
+    total_time = float(BASE_OVERHEAD_S) + float(overhead_s) + dig_time + shake_time
 
     # Metrics with animation calibration applied to time
     time_with_anim = max(1e-6, total_time) * float(anim_mult)
@@ -246,6 +337,7 @@ def compute_once(
         eff_luck=eff_luck,
         eff_shake_str=eff_shake_str,
         shakes=shakes,
+        digs=digs,
         time_per_pan_s=total_time,  # raw cycle time (without anim multiplier)
         efficiency=efficiency,
         profit_rate=profit_rate,
@@ -270,6 +362,15 @@ def mc_overhead_sim(
     seed=42,
     anim_mult: float = 1.0,
 ):
+    """
+    Monte Carlo on per-pan cycle time using the same timing law as compute_once:
+      - digs: t = digs * T_DIG_SECONDS / (dig_factor ** ALPHA_DIG)
+      - shakes: t = (shakes * T_SHAKE_SECONDS * pan_mult) / shake_factor + FIRST_SHAKE_EXTRA
+      - fixed lockouts: BASE_OVERHEAD_S
+      - extra human delay: ~N(mu, sigma) clamped to [min, max]
+      - efficiency/profit computed with animation multiplier applied to time
+    """
+    # Build baseline with 0 extra overhead so we don't double-count it in trials
     base_totals, base_res = compute_once(
         pan,
         shovel,
@@ -279,40 +380,60 @@ def mc_overhead_sim(
         buff_rows,
         luck_mult,
         str_mult,
-        overhead_mu,
+        0.0,  # no user overhead here
         login_bonus_luck,
-        anim_mult=1.0,
+        anim_mult=1.0,  # baseline; anim is applied per MC sample
     )
-    per_shake_seconds = BASE_SHAKE_SECONDS * float(pan["shake_speed_mult"])
-    dig_factor = (1.0 + base_totals["dig_speed"] / 100.0) * float(
-        shovel["dig_speed_mult"]
-    )
-    shake_factor = 1.0 + base_totals["shake_speed"] / 100.0
 
-    eff_luck = base_res["eff_luck"]
-    cap = base_totals["capacity"]
-    sell = base_totals["sell"]
-    shakes = base_res["shakes"]
+    # Speed factors (constant across all samples for a fixed build)
+    dig_factor = (1.0 + float(base_totals.get("dig_speed", 0.0)) / 100.0) * float(
+        shovel.get("dig_speed_mult", 1.0)
+    )
+    shake_factor = 1.0 + float(base_totals.get("shake_speed", 0.0)) / 100.0
+    dig_factor = max(1e-6, dig_factor)
+    shake_factor = max(1e-6, shake_factor)
+
+    # Counts from the same law as compute_once
+    digs = int(base_res["digs"])
+    shakes = int(base_res["shakes"])
+
+    # Per-shake seconds + first-shake constant add-on
+    pan_mult = float(pan.get("shake_speed_mult", 1.0))
+    per_shake_seconds = float(T_SHAKE_SECONDS) * pan_mult
+    first_shake_extra = float(globals().get("FIRST_SHAKE_EXTRA", 0.0))
+
+    # Scalars for efficiency/profit
+    eff_luck = float(base_res["eff_luck"])
+    cap = float(base_totals["capacity"])
+    sell = float(base_totals["sell"])
 
     rng = np.random.default_rng(seed)
     eff_vals, prof_vals, time_vals = [], [], []
 
     for _ in range(int(runs)):
-        overhead = np.clip(
-            rng.normal(overhead_mu, overhead_sigma), overhead_min, overhead_max
+        # Sample extra human delay and clamp
+        extra = float(
+            np.clip(rng.normal(overhead_mu, overhead_sigma), overhead_min, overhead_max)
         )
-        shake_time = (shakes * per_shake_seconds) / max(1e-6, shake_factor)
-        collect_time = BASE_COLLECT_SECONDS / max(1e-6, dig_factor)
-        total_time = overhead + shake_time + collect_time
 
-        # Animation multiplier applied to time for efficiency/profit
+        # Multi-dig timing with exponent
+        dig_time = (digs * float(T_DIG_SECONDS)) / (dig_factor ** float(ALPHA_DIG))
+
+        # Shake timing + constant first-shake startup
+        shake_time_core = (shakes * per_shake_seconds) / shake_factor
+        shake_time = shake_time_core + (first_shake_extra if shakes > 0 else 0.0)
+
+        # Fixed lockouts + sampled human delay
+        total_time = float(BASE_OVERHEAD_S) + extra + dig_time + shake_time
+
+        # Metrics (apply animation multiplier to time)
         time_with_anim = max(1e-6, total_time) * float(anim_mult)
         eff = (eff_luck * math.sqrt(max(0.0, cap))) / time_with_anim
         prof = eff * (1.0 + sell / 100.0)
 
+        time_vals.append(total_time)
         eff_vals.append(eff)
         prof_vals.append(prof)
-        time_vals.append(total_time)
 
     return dict(
         time_mean=float(np.mean(time_vals)),
@@ -352,8 +473,92 @@ st.caption("Build Planner and Build Generator")
 
 equip, equip6_map, enchants, potions, buffs, pans, shovels = load_csvs()
 
+# === Apply a pending imported build BEFORE any widgets are created ===
+pending = st.session_state.pop("pending_import_payload", None)
+if pending:
+    # Make quick name lists for membership checks
+    _neck_names = (
+        equip[equip["slot"].astype(str).str.strip().str.lower() == "necklace"]["name"]
+        .astype(str)
+        .str.strip()
+        .tolist()
+    )
+    _charm_names = (
+        equip[equip["slot"].astype(str).str.strip().str.lower() == "charm"]["name"]
+        .astype(str)
+        .str.strip()
+        .tolist()
+    )
+    _ring_names = (
+        equip[equip["slot"].astype(str).str.strip().str.lower() == "ring"]["name"]
+        .astype(str)
+        .str.strip()
+        .tolist()
+    )
+    _pan_names = pans["name"].astype(str).str.strip().tolist()
+    _shv_names = shovels["name"].astype(str).str.strip().tolist()
+
+    # Pan / Shovel
+    pn = str(pending.get("pan_name", "")).strip()
+    sv = str(pending.get("shovel_name", "")).strip()
+    if pn in _pan_names:
+        st.session_state["pan_select"] = pn
+    if sv in _shv_names:
+        st.session_state["shovel_select"] = sv
+
+    # Neck
+    neck = pending.get("neck") or {}
+    nn = str(neck.get("name", "(Empty)")).strip()
+    st.session_state["neck_select"] = (
+        nn if (nn == "(Empty)" or nn in _neck_names) else "(Empty)"
+    )
+    st.session_state["neck_star6_cb"] = bool(
+        neck.get("star6", False) and nn in equip6_map
+    )
+
+    # Charm
+    charm = pending.get("charm") or {}
+    cn = str(charm.get("name", "(Empty)")).strip()
+    st.session_state["charm_select"] = (
+        cn if (cn == "(Empty)" or cn in _charm_names) else "(Empty)"
+    )
+    st.session_state["charm_star6_cb"] = bool(
+        charm.get("star6", False) and cn in equip6_map
+    )
+
+    # Rings (8)
+    rings = pending.get("rings") or []
+    for i in range(8):
+        r = (
+            rings[i]
+            if (i < len(rings) and isinstance(rings[i], dict))
+            else {"name": "(Empty)", "star6": False}
+        )
+        rn = str(r.get("name", "(Empty)")).strip()
+        st.session_state[f"ring_sel_{i+1}"] = (
+            rn if (rn == "(Empty)" or rn in _ring_names) else "(Empty)"
+        )
+        st.session_state[f"ring_star6_{i+1}"] = bool(
+            r.get("star6", False) and rn in equip6_map
+        )
+
+    # Other toggles / selects
+    ename = str(pending.get("enchant", "")).strip()
+    if ename in enchants["name"].astype(str).str.strip().tolist():
+        st.session_state["ench_select"] = ename
+    st.session_state["potions_select"] = pending.get("potions", []) or []
+    st.session_state["buffs_select"] = pending.get("buffs", []) or []
+    st.session_state["login_bonus_luck"] = int(pending.get("login_bonus_luck", 0))
+    st.session_state["meteor_cb"] = bool(pending.get("meteor", False))
+    st.session_state["luck_totem_cb"] = bool(pending.get("luck_totem", False))
+    st.session_state["str_totem_cb"] = bool(pending.get("str_totem", False))
+    st.session_state["anim_cal_planner"] = bool(pending.get("apply_anim", False))
+
+
 # Info
-tab_info, tab_build, tab_opt = st.tabs(["Information", "Build Planner", "Optimizer(BETA)"])
+tab_info, tab_build, tab_opt = st.tabs(
+    ["Information", "Build Planner", "Optimizer(BETA)"]
+)
 
 with tab_info:
     st.markdown("## What the stats mean")
@@ -504,24 +709,53 @@ with tab_build:
                 ring_choices.append(choice)
                 ring_star6_flags.append(star6)
 
-    # Enchants, Potions, Buffs
+    # Enchants / Potions / Buffs
     st.subheader("Enchants, Potions & Buffs")
     c1, c2, c3, c4 = st.columns(4)
     with c1:
-        ench_name = st.selectbox(
-            "Pan Enchant", enchants["name"].tolist(), key="ench_select"
-        )
+        if "ench_select" in st.session_state:
+            ench_name = st.selectbox(
+                "Pan Enchant", enchants["name"].tolist(), key="ench_select"
+            )
+        else:
+            # only supply a default index if the key doesn't exist yet
+            ench_name = st.selectbox(
+                "Pan Enchant", enchants["name"].tolist(), key="ench_select"
+            )
+
     with c2:
-        pot_sel = st.multiselect(
-            "Potions (stacking)",
-            potions["name"].tolist(),
-            key="potions_select",
-            default=[],
-        )
+        pot_options = potions["name"].astype(str).str.strip().tolist()
+        # filter any pre-seeded values to valid options
+        if "potions_select" in st.session_state:
+            st.session_state["potions_select"] = [
+                p
+                for p in (st.session_state.get("potions_select") or [])
+                if p in pot_options
+            ]
+            pot_sel = st.multiselect(
+                "Potions (stacking)", pot_options, key="potions_select"
+            )
+        else:
+            pot_sel = st.multiselect(
+                "Potions (stacking)", pot_options, key="potions_select"
+            )
+
     with c3:
-        buff_sel = st.multiselect(
-            "Permanent Buffs", buffs["name"].tolist(), key="buffs_select", default=[]
-        )
+        buff_options = buffs["name"].astype(str).str.strip().tolist()
+        if "buffs_select" in st.session_state:
+            st.session_state["buffs_select"] = [
+                b
+                for b in (st.session_state.get("buffs_select") or [])
+                if b in buff_options
+            ]
+            buff_sel = st.multiselect(
+                "Permanent Buffs", buff_options, key="buffs_select"
+            )
+        else:
+            buff_sel = st.multiselect(
+                "Permanent Buffs", buff_options, key="buffs_select"
+            )
+
     with c4:
         login_bonus_luck = st.number_input(
             "Extra Luck from login days",
@@ -612,9 +846,10 @@ with tab_build:
         anim_mult=anim_mult,
     )
 
-    base_dig_pct   = 100.0 + (float(shovel.get("dig_speed_mult", 1.0)) - 1.0) * 100.0
-    base_shake_pct = 100.0
-    dig_speed_ui   = totals.get("dig_speed", 0.0) + base_dig_pct
+    base_dig_pct = 100.0 + (float(shovel.get("dig_speed_mult", 1.0)) - 1.0) * 100.0
+    base_shake_pct = 100.0 + (float(pan.get("shake_speed_mult", 1.0)) - 1.0) * 100.0
+
+    dig_speed_ui = totals.get("dig_speed", 0.0) + base_dig_pct
     shake_speed_ui = totals.get("shake_speed", 0.0) + base_shake_pct
 
     st.markdown(
@@ -645,6 +880,7 @@ with tab_build:
         st.write(f"**Shake STR (effective):** {res['eff_shake_str']:.2f}")
     with d2:
         st.write(f"**Shakes:** {res['shakes']}")
+        st.write(f"**Digs:** {res['digs']}")
         st.write(f"**Cycle time (ideal):** {res['time_per_pan_s']:.3f} s")
 
     st.subheader("Key metrics")
@@ -790,55 +1026,8 @@ with tab_build:
             try:
                 payload = json.loads(pasted) if pasted and pasted.strip() else None
                 if payload:
-                    st.session_state["pan_select"] = payload.get("pan_name", pan_name)
-                    st.session_state["shovel_select"] = payload.get(
-                        "shovel_name", shv_name
-                    )
-                    st.session_state["neck_select"] = (
-                        payload.get("neck", {}) or {}
-                    ).get("name", "(Empty)")
-                    st.session_state["neck_star6_cb"] = bool(
-                        (payload.get("neck", {}) or {}).get("star6", False)
-                    )
-                    st.session_state["charm_select"] = (
-                        payload.get("charm", {}) or {}
-                    ).get("name", "(Empty)")
-                    st.session_state["charm_star6_cb"] = bool(
-                        (payload.get("charm", {}) or {}).get("star6", False)
-                    )
-                    rings = payload.get("rings", []) or []
-                    for i in range(8):
-                        st.session_state[f"ring_sel_{i+1}"] = (
-                            rings[i]["name"]
-                            if i < len(rings) and isinstance(rings[i], dict)
-                            else "(Empty)"
-                        )
-                        st.session_state[f"ring_star6_{i+1}"] = (
-                            bool(rings[i].get("star6", False))
-                            if i < len(rings) and isinstance(rings[i], dict)
-                            else False
-                        )
-                    st.session_state["ench_select"] = payload.get(
-                        "enchant", st.session_state.get("ench_select")
-                    )
-                    st.session_state["potions_select"] = (
-                        payload.get("potions", []) or []
-                    )
-                    st.session_state["buffs_select"] = payload.get("buffs", []) or []
-                    st.session_state["login_bonus_luck"] = int(
-                        payload.get("login_bonus_luck", 0)
-                    )
-                    st.session_state["meteor_cb"] = bool(payload.get("meteor", False))
-                    st.session_state["luck_totem_cb"] = bool(
-                        payload.get("luck_totem", False)
-                    )
-                    st.session_state["str_totem_cb"] = bool(
-                        payload.get("str_totem", False)
-                    )
-                    st.session_state["anim_cal_planner"] = bool(
-                        payload.get("apply_anim", False)
-                    )
-                    st.success("Build imported. Rerunning to apply controls.")
+                    st.session_state["pending_import_payload"] = payload
+                    st.success("Build imported. Applying controls…")
                     st.rerun()
                 else:
                     st.warning("No JSON found.")
@@ -1217,37 +1406,56 @@ with tab_opt:
                     min(1.0, idx / total_steps),
                     text=f"Combo {idx}/{total_steps}: {pname} × {sname} × {ename}",
                 )
-                prow = pans[pans["name"] == pname].iloc[0]
-                srow = shovels[shovels["name"] == sname].iloc[0]
 
-                totals = dict(
-                    luck=float(pan["luck"]),
-                    capacity=float(pan["capacity"]),
-                    shake_str=float(pan["shake_str"]),
-                    dig_str=float(shovel["dig_str"]),
-                    dig_speed=0.0,
-                    shake_speed=0.0,
-                    sell=float(pan.get("sell", 0.0)) + float(shovel.get("sell", 0.0)),
-                    size=float(pan.get("size", 0.0)) + float(shovel.get("size", 0.0)),
-                    modifier=float(pan.get("modifier", 0.0)) + float(shovel.get("modifier", 0.0)),
+                # --- Safe row lookups (trimmed names) ---
+                _pname = str(pname).strip()
+                _sname = str(sname).strip()
+                _ename = str(ename).strip()
+
+                prow_df = pans.loc[pans["name"].astype(str).str.strip() == _pname]
+                if prow_df.empty:
+                    st.warning(f"Pan '{_pname}' not found; skipping.")
+                    continue
+                srow_df = shovels.loc[shovels["name"].astype(str).str.strip() == _sname]
+                if srow_df.empty:
+                    st.warning(f"Shovel '{_sname}' not found; skipping.")
+                    continue
+                erow_df = enchants.loc[
+                    enchants["name"].astype(str).str.strip() == _ename
+                ]
+                if erow_df.empty:
+                    st.warning(f"Enchant '{_ename}' not found; skipping.")
+                    continue
+
+                prow = prow_df.iloc[0]
+                srow = srow_df.iloc[0]
+                ench_row = erow_df.iloc[0]
+
+                # --- Build the pan/shovel objects for THIS combo (don't use planner's pan/shovel) ---
+                pan_obj = dict(
+                    name=prow["name"],
+                    luck=float(prow["luck"]),
+                    capacity=float(prow["capacity"]),
+                    shake_str=float(prow["shake_str"]),
+                    shake_speed_mult=float(prow["shake_speed_mult"]),
+                    sell=float(prow.get("sell", 0.0)),
+                    size=float(prow.get("size", 0.0)),
+                    modifier=float(prow.get("modifier", 0.0)),
                 )
-
-                shovel = dict(
+                shovel_obj = dict(
                     name=srow["name"],
                     dig_str=float(srow["dig_str"]),
                     dig_speed_mult=float(srow["dig_speed_mult"]),
-                    toughness=float(srow["toughness"]),
+                    toughness=float(srow.get("toughness", 0.0)),
                     sell=float(srow.get("sell", 0.0)),
                     size=float(srow.get("size", 0.0)),
                     modifier=float(srow.get("modifier", 0.0)),
                 )
 
-                ench_row = enchants[enchants["name"] == ename].iloc[0]
-
-                # shortlist neck/charm
+                # --- shortlist + greedy using the combo's pan/shovel ---
                 nc_pairs = shortlist_neck_charm(
-                    pan,
-                    shovel,
+                    pan_obj,
+                    shovel_obj,
                     ench_row,
                     neck_df,
                     charm_df,
@@ -1258,8 +1466,8 @@ with tab_opt:
                 for n_item, c_item in nc_pairs:
                     base_items = [n_item, c_item]
                     ring_cands = shortlist_rings(
-                        pan,
-                        shovel,
+                        pan_obj,
+                        shovel_obj,
                         ench_row,
                         base_items,
                         ring_df,
@@ -1269,8 +1477,8 @@ with tab_opt:
                         anim_mult=anim_mult_opt,
                     )
                     best = greedy_fill(
-                        pan,
-                        shovel,
+                        pan_obj,
+                        shovel_obj,
                         ench_row,
                         base_items,
                         ring_cands,
@@ -1284,9 +1492,9 @@ with tab_opt:
                         item_names = [i["name"] for i in best["items"]]
                         builds.append(
                             dict(
-                                pan_name=pname,
-                                shovel_name=sname,
-                                ench_name=ename,
+                                pan_name=_pname,
+                                shovel_name=_sname,
+                                ench_name=_ename,
                                 neck=n_item["name"],
                                 charm=c_item["name"],
                                 items=best["items"],
