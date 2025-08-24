@@ -604,6 +604,65 @@ with tab_info:
 - We use a modified version of Nidolya's forumula for calculating efficiency and profit. Instead of a static .625 time multiplier, we use a dynamic multiplier based on the specific equipment and buffs you have active.
     """
     )
+    st.markdown("## Formulas")
+    st.markdown(
+        """
+### 1. Digging
+Digs = ceil( Capacity / (K_dig_fill × DigStrength) )  
+t_dig = (Digs × T_dig) / (DigFactor^α_dig)
+
+Where:  
+- K_dig_fill = 1.5  
+- T_dig = 1.40s  
+- α_dig = 0.50  
+- DigFactor = (1 + DigSpeed%/100) × ShovelDigSpeedMult  
+
+---
+
+### 2. Shaking
+Shakes = ceil( Capacity / ShakeStrength_eff )  
+t_shake = (Shakes × T_shake × PanMult) / ShakeFactor + t_first_shake
+
+Where:  
+- T_shake = 0.54s  
+- ShakeFactor = 1 + ShakeSpeed%/100  
+- t_first_shake = 0.07s  
+
+---
+
+### 3. Cycle Time
+t_cycle = t_dig + t_shake + (t_post_dig + t_post_shake) + t_overhead  
+
+Where:  
+- t_post_dig = 0.16s  
+- t_post_shake = 1.95s  
+- t_overhead = 0 (ideal) or user delay (Monte Carlo)  
+
+If animation calibration is applied:  
+t_cycle × 1.20  
+
+---
+
+### 4. Efficiency
+Efficiency = (Luck_eff × √Capacity) / t_cycle  
+
+Where:  
+- Luck_eff = Luck × (Meteor × Totems)  
+
+---
+
+### 5. Profit
+ProfitRate = Efficiency × (1 + SellBoost/100)  
+
+---
+
+### 6. Overhead (Monte Carlo)
+t_overhead ~ Normal(μ, σ) clamped to [min, max]  
+
+Each trial recalculates cycle time, efficiency, and profit.  
+Results are reported as **mean ± standard deviation**.  
+    """
+    )
 
 # Build Planner
 with tab_build:
