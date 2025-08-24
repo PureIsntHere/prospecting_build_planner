@@ -2,6 +2,8 @@
 
 Build planner and optimizer for the Prospecting style game. It estimates cycle time and efficiency from your selected pan, shovel, equipment, enchants, potions, and buffs, including six star overrides and pan passives.
 
+You Can find a live version of this app at https://pures-optimizer.streamlit.app/
+
 ## Features
 
 1. Build Planner tab to see total stats and derived timing
