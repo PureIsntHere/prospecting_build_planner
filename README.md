@@ -1,11 +1,11 @@
 # Pures Optimizer
 
-Build planner and optimizer for the Prospecting style game. It estimates cycle time and efficiency from your selected pan, shovel, equipment, enchants, potions, and buffs, including six star overrides and pan passives.
+Build planner and optimizer for Prospecting
 
 ## Features
 
 1. Build Planner tab to see total stats and derived timing
-2. Optimizer tab to search gear combinations using a shortlist and greedy fill
+2. Optimizer tab to search gear combinations
 3. Monte Carlo option to model human overhead variance
 4. Import and export of build presets as JSON
 5. Support for six star item overrides and pan passive parsing
