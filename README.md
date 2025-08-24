@@ -1,13 +1,11 @@
 # Pures Optimizer
 
-Build planner and optimizer for the Prospecting style game. It estimates cycle time and efficiency from your selected pan, shovel, equipment, enchants, potions, and buffs, including six star overrides and pan passives.
-
-You Can find a live version of this app at https://pures-optimizer.streamlit.app/
+Build planner and optimizer for Prospecting
 
 ## Features
 
 1. Build Planner tab to see total stats and derived timing
-2. Optimizer tab to search gear combinations using a shortlist and greedy fill
+2. Optimizer tab to search gear combinations
 3. Monte Carlo option to model human overhead variance
 4. Import and export of build presets as JSON
 5. Support for six star item overrides and pan passive parsing
@@ -74,17 +72,6 @@ Import
 1. Paste a JSON preset in Import build and submit.
 2. The app stores the payload and reruns so widgets initialize from the imported state.
 
-## Timing model
-
-These constants live near the top of app.py and can be tuned from new measurements.
-
-1. K_DIG_FILL controls how many digs are required from capacity and dig strength
-2. ALPHA_DIG controls how dig speed scales dig animation time
-3. T_DIG_SECONDS base time per dig before dig speed scaling
-4. T_SHAKE_SECONDS base time per shake before shake speed scaling
-5. FIRST_SHAKE_EXTRA extra one time overhead added at the start of a shake sequence
-6. POST_DIG_LOCK_S and POST_SHAKE_LOCK_S fixed lockouts per pan
-7. ANIM_EXTRA optional multiplier applied to total time when the animation toggle is on
 
 Cycle time equals:
 fixed lockouts plus human overhead plus dig time plus shake time
@@ -95,18 +82,10 @@ effective luck times square root of capacity divided by cycle time after the ani
 Profit rate equals:
 efficiency times one plus sell boost divided by one hundred
 
-## Troubleshooting
-
-1. If you change CSV headers or code and Streamlit shows stale behavior, clear the cache or rerun the app.
-2. If you see out of bounds errors when indexing rows, check for trailing spaces in CSV name columns.
-3. If a widget cannot be modified after creation, ensure imported JSON is applied to session state before any widgets are created. The app already stages pending imports and reruns to apply them.
-4. If speed or passives look doubled, confirm that pan passive values are not already baked into the numeric columns. The loader only fills from passives when the numeric column is zero or missing.
-
 ## Folder layout
 
 1. app.py main Streamlit application
 2. data CSVs in the same folder as app.py
 
 ## License
-
-Add your preferred license text here.
+[MIT](https://raw.githubusercontent.com/PureIsntHere/prospecting_build_planner/refs/heads/main/LICENSE)

@@ -601,6 +601,7 @@ with tab_info:
 - Always double-check the suggested builds and adjust based on your playstyle and preferences.
 - If you encounter any issues or have suggestions, please reach out to the ItsPure on discord.
 - If you have 100% Equipment, 100% 6 Star equipment, etc that isnt in the database. Feel Free to reach out to ItsPure on discord and I will get it added.
+- We use a modified version of Nidolya's forumula for calculating efficiency and profit. Instead of a static .625 time multiplier, we use a dynamic multiplier based on the specific equipment and buffs you have active.
     """
     )
 
